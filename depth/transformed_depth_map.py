@@ -8,6 +8,13 @@ import torch
 class Intrinsics(object) :
 
     """Summary
+    
+    Attributes:
+        fx (TYPE): Description
+        fy (TYPE): Description
+        s (TYPE): Description
+        x0 (TYPE): Description
+        y0 (TYPE): Description
     """
     
     def __init__(self, intrinsics) :
@@ -25,6 +32,11 @@ class Intrinsics(object) :
 
     @property
     def value(self):
+        """Summary
+        
+        Returns:
+            TYPE: Description
+        """
         if self._value is None :
             """
                 --                   --
@@ -40,6 +52,36 @@ class Intrinsics(object) :
             self._value = torch.cat((row_1, row_2, row_3), dim=-2)
         return self._value
 
+class Translation(object) :
+    def __init__(self, translation) :
+        if len(translation.shape) == 2 :
+            N, C = translation.shape
+            assert C == 3, "Translation should be 3 dimensional"
+            self.__translation = translation.reshape(N, 1, 1, 3)
+        else :
+            N, H, W, C = translation.shape
+            assert C == 3, "Translation must be 3 dimensional"
+            self.__translation = translation.clone()
+
+    @property
+    def shape(self):
+        return self.value.shape
+    
+    @property
+    def value(self):
+        return self.__translation
+    
+
+    def __add__(self, other) :
+        N, _, _, _ = self.shape
+        if other.shape == self.shape :
+            return Translation(other.value + self.value)
+        elif other.shape == torch.Size([N, 1, 1, 3]) :
+            N, H, W, C = self.shape
+            return Translation(other.value.expand(N, H, W, C) + self.value)
+        else :
+            N, H, W, C = other.shape
+            return Translation(self.value.expand(N, H, W, C) + other.value)
 
 class Rotation(object) :
 
@@ -148,6 +190,33 @@ class DepthMap(object):
         """
         self.__depth = depth
         self.__xy_inframe = xy_inframe
+        self.__grid = None
+
+        @property
+        def grid(self):
+            """
+            Represents the (x,y) position of every pixel 
+            in the depth map
+            
+            Returns:
+                TYPE: Description
+            """
+            if self.__grid is None :
+                N, H, W = self.depth.shape
+                device = self.depth.device
+                x = torch.linspace(0, W-1, W)
+                y = torch.linspace(0, H-1, H)
+                y, x = torch.meshgrid(y, x)
+                self.__grid = torch.ones((N, 3, H, W))
+                self.__grid[:, 0, :, :] = x
+                self.__grid[:, 1, :, :] = y
+                self.__grid = self.__grid.to(device)
+
+            return self.__grid
+
+        @grid.setter
+        def grid(self, grid) :
+            self.__grid = grid
 
         @property
         def depth(self):
@@ -171,7 +240,7 @@ class DepthMap(object):
             return self.__xy_inframe
 
         def transform(self, translation, rotation, intrinsics) :
-            """Summary
+            """
             
             Args:
                 translation (TYPE): Description
