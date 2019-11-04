@@ -2,7 +2,19 @@ import unittest
 import torch
 import numpy as np
 
-from transformed_depth_map import DepthMap, Rotation
+from transformed_depth_map import DepthMap, Rotation, Intrinsics
+
+class TestIntrinsics(unittest.TestCase) :
+	def test_intrinsics(self) :
+		intrinsics = Intrinsics(torch.FloatTensor([1, 2, 3, 4, 5]).reshape(1, 5))
+		expected = torch.FloatTensor([
+			[1, 5, 3],
+			[0, 2, 4],
+			[0, 0, 1]
+			])
+		self.assertEqual(torch.sum((expected!=intrinsics.value[0]).float()),0, "Intrinsics equality must match")
+
+
 class TestRotation(unittest.TestCase) :
 	def test_identity(self) :
 		rotation = Rotation(torch.FloatTensor([0,0,0]).reshape(1, 3))

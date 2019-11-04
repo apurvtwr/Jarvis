@@ -26,10 +26,17 @@ class Intrinsics(object) :
     @property
     def value(self):
         if self._value is None :
+            """
+                --                   --
+                |   fx      s   x0    |
+             H  |   0       fy  y0    |
+                |   0       0   1     |
+                --                   --    
+            """
             row_1 = torch.cat((self.fx, self.s, self.x0), dim=-1)
             row_2 = torch.cat((torch.zeros_like(self.fy), self.fy, self.y0), dim=-1)
             row_3 = torch.cat((torch.zeros_like(self.fx), 
-                self.zeros_like(self.fx), torch.ones_like(fx)), dim=-1)
+                torch.zeros_like(self.fx), torch.ones_like(self.fx)), dim=-1)
             self._value = torch.cat((row_1, row_2, row_3), dim=-2)
         return self._value
 
