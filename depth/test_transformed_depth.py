@@ -2,22 +2,23 @@ import unittest
 import torch
 import numpy as np
 
-from transformed_depth_map import DepthMap, Rotation, Intrinsics, Translation
+from transformed_depth_map import DepthMap
+from depth_transformation_utils import Rotation, Intrinsics, Translation
 
 class TestTranslation(unittest.TestCase) :
 	def test_foreground(self) :
 		translation = Translation(torch.FloatTensor([[1, 2, 3]]).reshape(1, 3))
 		expected = torch.FloatTensor([
 			[1,2,3]
-			]).reshape(1, 1, 1, 3)
+			]).reshape(1, 3, 1, 1)
 		self.assertEqual(torch.sum((expected!=translation.value[0]).float()), 0, "Translation vector must match")
 
 	def test_addition(self) :
-		background_tensor = torch.rand(2, 100, 100, 3)
+		background_tensor = torch.rand(2, 3, 100, 100)
 		background = Translation(background_tensor)
 		foreground_tensor = torch.FloatTensor([[1, 2, 3]]).reshape(1, 3).expand(2, 3)
 		foreground = Translation(foreground_tensor)
-		expected = background_tensor + foreground_tensor.reshape(2, 1, 1, 3).expand(2, 100, 100, 3)
+		expected = background_tensor + foreground_tensor.reshape(2, 3, 1, 1).expand(2, 3, 100, 100)
 		s = background + foreground
 		self.assertEqual(torch.sum((expected!=s.value).float()),0, "Sum equality must match")
 
