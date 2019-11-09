@@ -2,7 +2,7 @@ import unittest
 import torch
 import numpy as np
 
-from transformed_depth_map import DepthMap
+from depth_map import DepthMap
 from depth_transformation_utils import Rotation, Intrinsics, Translation
 
 class TestTranslation(unittest.TestCase) :
