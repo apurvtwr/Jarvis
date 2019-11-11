@@ -80,11 +80,11 @@ class ReconstructionLoss(object) :
         """
         frame2_resampled_depth = field_sampling(frame2.depth_map.depth, frame1.grid)
         frame2_resampled_image = field_sampling(frame2.image, frame1.grid)
-        frame1_closer = (frame2_resampled_depth > frame1.depth_map.depth).float() * frame1.mask
+        frame1_closer = (frame2_resampled_depth >= frame1.depth_map.depth).float() * frame1.mask
 
-        rgb_loss = cls.rgb_loss(frame1, frame2_resampled_image, frame1_closer)
-        motion_field_loss = cls.motion_field_loss(frame1, frame2, frame1_closer)
-        ssim_loss = cls.ssim_loss(frame1, frame2_resampled_depth, frame1_closer)
+        rgb_loss = self.rgb_loss(frame1, frame2_resampled_image, frame1_closer)
+        motion_field_loss = self.motion_field_loss(frame1, frame2, frame1_closer)
+        ssim_loss, avg_weight = self.ssim_loss(frame1, frame2_resampled_depth, frame1_closer)
 
     @classmethod
     def motion_field_loss(frame1, frame2, frame1_closer) :
@@ -95,7 +95,7 @@ class ReconstructionLoss(object) :
             frame2 (TYPE): Description
             frame1_closer (TYPE): Description
         """
-        pass
+        
 
     @classmethod
     def ssim_loss(cls, frame1, frame2_resampled_depth, 
@@ -130,6 +130,7 @@ class ReconstructionLoss(object) :
 
         ssim_error, avg_weight = weighted_ssim(frame2_resampled_image, 
             frame1.image, depth_weight)
+        return ssim_error, avg_weight
 
 
     @classmethod

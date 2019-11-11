@@ -56,14 +56,9 @@ class Intrinsics(object) :
 
 class Translation(object) :
     def __init__(self, translation) :
-        if len(translation.shape) == 2 :
-            N, C = translation.shape
-            assert C == 3, "Translation should be 3 dimensional"
-            self.__translation = translation.reshape(N, 3, 1, 1)
-        else :
-            N, C, H, W = translation.shape
-            assert C == 3, "Translation must be 3 dimensional"
-            self.__translation = translation.clone()
+        N, C, H, W = translation.shape
+        assert C == 3, "Translation must be 3 dimensional"
+        self.__translation = translation
 
     @property
     def shape(self):
@@ -72,19 +67,7 @@ class Translation(object) :
     @property
     def value(self):
         return self.__translation
-    
-
-    def __add__(self, other) :
-        N, _, _, _ = self.shape
-        if other.shape == self.shape :
-            return Translation(other.value + self.value)
-        elif other.shape == torch.Size([N, 3, 1, 1]) :
-            N, C, H, W = self.shape
-            return Translation(other.value.expand(N, C, H, W) + self.value)
-        else :
-            N, C, H, W = other.shape
-            return Translation(self.value.expand(N, C, H, W) + other.value)
-
+        
 class Rotation(object) :
 
     """Summary
