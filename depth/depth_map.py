@@ -1,4 +1,5 @@
 """
+Paper : https://arxiv.org/pdf/1904.04998.pdf
 A depth map is the tensor representation [N, H, W] of depth per pixel.
 This class encapsulates the transformation of depth with camera
 motion (translation and rotation) and foreground motion.
@@ -30,6 +31,14 @@ class DepthMap(object):
         self.__grid = None
 
     @property
+    def mask(self) :
+        return self.__mask
+
+    @mask.setter
+    def mask(self, mask) :
+        self.__mask = mask
+
+    @property
     def grid(self):
         """
         Represents the (x,y) position of every pixel 
@@ -53,7 +62,7 @@ class DepthMap(object):
 
     @grid.setter
     def grid(self, grid) :
-        self.__grid = grid.clone()
+        self.__grid = grid
 
     @property
     def depth(self):
@@ -63,7 +72,7 @@ class DepthMap(object):
         Returns:
             torch.FloatTensor: FloatTensor of shape [N, H, W]
         """
-        return self.__depth.clone()
+        return self.__depth
 
     @depth.setter
     def depth(self, depth) :
@@ -103,6 +112,7 @@ class DepthMap(object):
         oor = ~(x_in_r * y_in_r * y_in_r)
         oor = oor.reshape(N, 1, H, W).expand(N, 3, H, W)
         grid_final[oor] = -1 # places where we are out of range, set the grid to -1 
+        self.mask = (x_in_r * y_in_r * y_in_r).float()
         self.grid = grid_final
         self.depth = z_final[:, 0, :, :]
 

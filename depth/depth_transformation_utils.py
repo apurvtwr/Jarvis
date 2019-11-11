@@ -1,4 +1,5 @@
 """
+Paper : https://arxiv.org/pdf/1904.04998.pdf
 Utility functions to get TransformedMap from model outputs
 """
 

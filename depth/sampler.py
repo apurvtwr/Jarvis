@@ -12,8 +12,19 @@ def field_sampling(field, grid) :
     field [N, C, H, W] original field to sample from. 
     grid [N, 2, H, W] is grid of x,y position for each location to sample from 
     """
-    N, C, H, W = field.shape
-    x_coord = (2 * grid[:, :1, :, :]/(W-1)) - 1
-    y_coord = (2 * grid[:, 1:, :, :]/(H-1)) - 1
-    coord = torch.stack((x_coord, y_coord), dim=1).permute(0, 2, 3, 1)
-    return F.grid_sample(field, coord)
+    no_channel_case = False
+    if len(field.shape) == 3 :
+        # No channel case 
+        no_channel_case = True
+        N, H, W = field.shape
+        x_coord = (2 * grid[:, :1, :, :]/(W-1)) - 1
+        y_coord = (2 * grid[:, 1:, :, :]/(H-1)) - 1
+        coord = torch.stack((x_coord, y_coord), dim=1).permute(0, 2, 3, 1)
+        return F.grid_sample(field.reshape(N, 1, H, W), coord)[:, 0, :, :]
+
+    else :
+        N, C, H, W = field.shape
+        x_coord = (2 * grid[:, :1, :, :]/(W-1)) - 1
+        y_coord = (2 * grid[:, 1:, :, :]/(H-1)) - 1
+        coord = torch.stack((x_coord, y_coord), dim=1).permute(0, 2, 3, 1)
+        return F.grid_sample(field, coord)
