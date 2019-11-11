@@ -17,14 +17,16 @@ def field_sampling(field, grid) :
         # No channel case 
         no_channel_case = True
         N, H, W = field.shape
-        x_coord = (2 * grid[:, :1, :, :]/(W-1)) - 1
-        y_coord = (2 * grid[:, 1:, :, :]/(H-1)) - 1
-        coord = torch.stack((x_coord, y_coord), dim=1).permute(0, 2, 3, 1)
+        x_coord = (2 * grid[:, 0, :, :]/(W-1)) - 1
+        y_coord = (2 * grid[:, 1, :, :]/(H-1)) - 1
+
+        coord_original = torch.stack((x_coord, y_coord), dim=1)
+        coord = coord_original.permute(0, 2, 3, 1)
         return F.grid_sample(field.reshape(N, 1, H, W), coord)[:, 0, :, :]
 
     else :
         N, C, H, W = field.shape
-        x_coord = (2 * grid[:, :1, :, :]/(W-1)) - 1
-        y_coord = (2 * grid[:, 1:, :, :]/(H-1)) - 1
+        x_coord = (2 * grid[:, 0, :, :]/(W-1)) - 1
+        y_coord = (2 * grid[:, 1, :, :]/(H-1)) - 1
         coord = torch.stack((x_coord, y_coord), dim=1).permute(0, 2, 3, 1)
         return F.grid_sample(field, coord)

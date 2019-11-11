@@ -113,7 +113,7 @@ class DepthMap(object):
         oor = oor.reshape(N, 1, H, W).expand(N, 3, H, W)
         grid_final[oor] = -1 # places where we are out of range, set the grid to -1 
         self.mask = (x_in_r * y_in_r * y_in_r).float()
-        self.grid = grid_final
+        self.grid = grid_final[:, :2, :, :]
         self.depth = z_final[:, 0, :, :]
 
 

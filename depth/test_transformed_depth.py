@@ -61,6 +61,7 @@ class TestRotation(unittest.TestCase) :
 			])
 		self.assertEqual(torch.sum((torch.FloatTensor(rz)!=rotation.value[0]).float()),0, "Rz equality must match")
 
+
 def main():
 	unittest.main()
 
