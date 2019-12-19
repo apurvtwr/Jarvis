@@ -87,16 +87,17 @@ class DepthMap(object):
             rotation (TYPE): Description
             intrinsics (TYPE): Description
         """
+        x_index = 50
+        y_index = 10
         N, H, W = self.depth.shape
         K = intrinsics.value # [N, 3, 3]
         R = rotation.value  # [N, 3, 3]
         T = translation.value # [N, 3, H, W]
         z_p_original = self.depth.reshape(N, 1, H, W) * self.grid # [N, 3, H, W]
-
+        
         K_R_Kinv = torch.einsum('bij,bjk,bkl->bil', K, R, K.inverse())
         z_p_rotation = torch.einsum('bij,bjkl->bikl', K_R_Kinv, z_p_original)
         z_p_translation = torch.einsum('bij,bjkl->bikl', K, T)
-
         z_p_final = z_p_rotation + z_p_translation
         z_final = z_p_final[:, 2:, :, :].clone()
         grid_final = torch.div(z_p_final, z_final)
@@ -111,7 +112,7 @@ class DepthMap(object):
         z_in_r = (0 < z_final[:, 0, :, :])
         oor = ~(x_in_r * y_in_r * y_in_r)
         oor = oor.reshape(N, 1, H, W).expand(N, 3, H, W)
-        grid_final[oor] = -1 # places where we are out of range, set the grid to -1 
+#         grid_final[oor] = -1 # places where we are out of range, set the grid to -1 
         self.mask = (x_in_r * y_in_r * y_in_r).float()
         self.grid = grid_final[:, :2, :, :]
         self.depth = z_final[:, 0, :, :]

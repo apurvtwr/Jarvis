@@ -55,10 +55,11 @@ class Intrinsics(object) :
         return self._value
 
 class Translation(object) :
-    def __init__(self, translation) :
+    def __init__(self, translation, bg) :
         N, C, H, W = translation.shape
         assert C == 3, "Translation must be 3 dimensional"
         self.__translation = translation
+        self.__bg = bg
 
     @property
     def shape(self):
@@ -67,6 +68,10 @@ class Translation(object) :
     @property
     def value(self):
         return self.__translation
+    
+    @property
+    def bg_motion(self) :
+        return torch.sqrt(torch.sum(self.__bg[:, :, 0, 0] ** 2, dim=1, keepdim=True))
         
 class Rotation(object) :
 
