@@ -25,10 +25,31 @@ def desktop():
     """Open desktop interface (start `jarvis serve` first)."""
     cfg = core.config()["server"]
     url = f"http://{cfg['host']}:{cfg['port']}"
-    for browser in ("chromium", "google-chrome", "chromium-browser"):
+    # Prefer an isolated browser app window with its own desktop identity.
+    import os
+    import time
+    from urllib.request import urlopen
+    from shutil import which
+    try:
+        with urlopen(url, timeout=1) as response:
+            if response.status >= 400:
+                raise RuntimeError(f"Backend returned {response.status}")
+    except Exception:
+        subprocess.run(["systemctl", "--user", "start", "jarvis.service"], check=False)
+        for _ in range(30):
+            try:
+                with urlopen(url, timeout=1):
+                    break
+            except Exception:
+                time.sleep(0.3)
+        else:
+            typer.echo("Jarvis backend is unavailable; inspect journalctl --user -u jarvis", err=True)
+            raise typer.Exit(code=1)
+    for browser in ("chromium", "google-chrome", "chromium-browser", "google-chrome-stable", "brave-browser"):
+
         from shutil import which
         if which(browser):
-            subprocess.Popen([browser, f"--app={url}"])
+            subprocess.Popen([browser, f"--app={url}", "--ozone-platform=x11", "--class=jarvis-app", "--name=jarvis-app", "--user-data-dir=" + str(Path.home() / ".local/share/jarvis/browser-profile")])
             return
     webbrowser.open(url)
 
@@ -43,10 +64,10 @@ def new(title: str = "New chat", folder: list[Path] = typer.Option(None, "--fold
 @app.command()
 def chats():
     """List conversations."""
-    table = Table("ID", "Title", "Created")
-    with core.db() as con:
-        for row in con.execute("SELECT * FROM conversations ORDER BY created DESC"):
-            table.add_row(row["id"], row["title"], row["created"][:19])
+    table = Table("ID", "Title", "Project", "Created")
+    names = {p["id"]: p["name"] for p in core.projects()}
+    for row in core.conversations():
+        table.add_row(row["id"], row["title"], names.get(row["project_id"], ""), row["created"][:19])
     console.print(table)
 
 @app.command()
@@ -65,6 +86,50 @@ def models():
     """List models available through configured providers."""
     for name in core.available_models():
         console.print(name)
+
+@app.command()
+def rename(chat_id: str, title: str):
+    """Rename a conversation."""
+    core.rename_conversation(chat_id, title)
+    console.print(title)
+
+@app.command()
+def delete(chat_id: str, yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation")):
+    """Permanently delete a conversation and its history."""
+    title = core.get_conversation(chat_id)["title"]
+    if not yes and not typer.confirm(f"Delete '{title}' permanently?"):
+        raise typer.Exit()
+    core.delete_conversation(chat_id)
+    console.print(f"Deleted {title}")
+
+@app.command()
+def move(chat_id: str, project_id: str = typer.Argument(None, help="Target project id; omit to remove from its project")):
+    """Move a conversation into a project (or out of one)."""
+    core.move_conversation(chat_id, project_id)
+    console.print(project_id or "No project")
+
+@app.command()
+def projects():
+    """List projects."""
+    table = Table("ID", "Name", "Chats")
+    chats = core.conversations()
+    for p in core.projects():
+        table.add_row(p["id"], p["name"], str(sum(c["project_id"] == p["id"] for c in chats)))
+    console.print(table)
+
+@app.command()
+def project(name: str, context: str = typer.Option("", "--context", help="Instructions shared by the project's chats")):
+    """Create a project."""
+    console.print(core.create_project(name, context))
+
+@app.command()
+def providers():
+    """Show configured LLM backends and whether they are reachable."""
+    table = Table("Provider", "Type", "Status", "Models")
+    for item in core.provider_status():
+        status = "[green]ok[/green]" if item["ok"] else f"[red]{item['error'][:60]}[/red]"
+        table.add_row(item["name"], item["type"] or "?", status, str(len(item["models"])))
+    console.print(table)
 
 @app.command()
 def chat(chat_id: str, model: str = "auto"):

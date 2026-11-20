@@ -3,6 +3,8 @@ Description=Jarvis AI Agent
 After=network.target
 [Service]
 Type=simple
+# API keys for cloud backends (OPENAI_API_KEY=..., ANTHROPIC_API_KEY=...); optional.
+EnvironmentFile=-%h/.config/jarvis/env
 ExecStart=@@EXEC@@ serve
 Restart=on-failure
 RestartSec=3

@@ -1,8 +1,14 @@
 [Desktop Entry]
+Version=1.0
 Type=Application
 Name=Jarvis
-Comment=Local Ollama AI agent
+GenericName=Local AI Assistant
+Comment=Jarvis local AI command center
 Exec=@@EXEC@@ desktop
+TryExec=@@EXEC@@
 Terminal=false
 Categories=Development;Utility;
-Icon=utilities-terminal
+StartupNotify=true
+StartupWMClass=jarvis-app
+Icon=jarvis
+Keywords=AI;Assistant;Ollama;Chat;
