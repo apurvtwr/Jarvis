@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """Jarvis native desktop shell for Ubuntu / GNOME.
 
 A GTK4 + libadwaita window hosting the Jarvis web UI in WebKitGTK 6.0, with a
@@ -14,6 +14,7 @@ rather than the project virtualenv. Ubuntu 24.04 packages:
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -26,9 +27,41 @@ CONFIG_DIR = Path(os.environ.get("LOCAL_AGENT_CONFIG", Path.home() / ".config/ja
 STATE_FILE = CONFIG_DIR / "window.json"
 REQUIRED = (("Gtk", "4.0"), ("Adw", "1"), ("WebKit", "6.0"), ("JavaScriptCore", "6.0"))
 
+APPARMOR_PROFILE = "jarvis-desktop"
+
 # WebKitGTK's DMA-BUF renderer shows a blank window on many NVIDIA drivers.
 if Path("/proc/driver/nvidia").exists():
     os.environ.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+
+
+def userns_blocked():
+    """True when Ubuntu's AppArmor policy will stop WebKit's bubblewrap sandbox:
+    unprivileged user namespaces are restricted and we are not running under
+    the jarvis-desktop profile (installed by `make install`)."""
+    try:
+        restricted = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").read_text().strip() == "1"
+    except OSError:
+        return False
+    if not restricted:
+        return False
+    try:
+        label = Path("/proc/self/attr/current").read_text().strip()
+    except OSError:
+        label = "unconfined"
+    # Any non-default profile may allow userns (e.g. the jarvis-desktop one); only plain
+    # "unconfined" is known to be blocked.
+    return label == "unconfined"
+
+
+def configure_sandbox():
+    if userns_blocked() and "WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS" not in os.environ:
+        # Without this WebKit's web process cannot start and the window dies immediately.
+        # Jarvis only renders its own localhost UI and opens other sites in the browser,
+        # but the sandbox should be restored by installing the AppArmor profile.
+        print("jarvis-desktop: AppArmor blocks user namespaces and the jarvis-desktop profile is not "
+              "active; running WebKit without its sandbox. Run `make install` to install the profile.",
+              file=sys.stderr)
+        os.environ["WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS"] = "1"
 
 
 def dependencies_ok():
@@ -115,6 +148,7 @@ def main(argv=None):
               file=sys.stderr)
         return 3
 
+    configure_sandbox()
     import gi
     for namespace, version in REQUIRED:
         gi.require_version(namespace, version)
@@ -294,6 +328,11 @@ def main(argv=None):
             self.connect("startup", self.on_startup)
 
         def on_startup(self, *_):
+            # On SIGTERM/SIGINT/SIGHUP close windows through GTK so the compositor sees a normal
+            # unmap. Dying mid-frame has crashed GNOME Shell 46 (tiling-assistant + mutter
+            # meta_window_get_workspaces assertion), taking the whole session down.
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, self.graceful_quit)
             Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
             Gtk.Window.set_default_icon_name("jarvis")
             css = Gtk.CssProvider()
@@ -314,6 +353,13 @@ def main(argv=None):
 
         def window(self):
             return self.get_active_window()
+
+        def graceful_quit(self, *_):
+            for win in list(self.get_windows()):
+                win.close()  # runs close-request (saves state) and unmaps cleanly
+            # Let the compositor process the unmap before the process exits.
+            GLib.timeout_add(250, lambda: self.quit() or False)
+            return GLib.SOURCE_REMOVE
 
         def run_js(self, code):
             win = self.window()

@@ -39,7 +39,8 @@ def desktop(browser: bool = typer.Option(False, "--browser", help="Open in a bro
     if not browser and Path(SYSTEM_PYTHON).exists():
         check = subprocess.run([SYSTEM_PYTHON, str(DESKTOP_SHELL), "--check"], env=desktop_env())
         if check.returncode == 0:
-            os.execve(SYSTEM_PYTHON, [SYSTEM_PYTHON, str(DESKTOP_SHELL), "--url", url], desktop_env())
+            # Exec the script itself (not python3 script) so its AppArmor profile attaches.
+            os.execve(str(DESKTOP_SHELL), [str(DESKTOP_SHELL), "--url", url], desktop_env())
         typer.echo("Native desktop libraries missing; falling back to a browser window.\n"
                    "Install them with: sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0", err=True)
     open_browser_window(url)

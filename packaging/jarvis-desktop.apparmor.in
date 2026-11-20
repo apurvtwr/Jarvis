@@ -1,0 +1,16 @@
+# AppArmor profile for the Jarvis desktop app.
+#
+# Ubuntu 24.04 blocks unprivileged user namespaces unless a profile allows
+# them. WebKitGTK needs them to sandbox its web process with bubblewrap. Like
+# Ubuntu's own profiles for devhelp, epiphany and foliate, this profile allows
+# everything else (flags=unconfined) and only exists to grant `userns` to this
+# one launcher. Installed by `make install` with the absolute launcher path.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile jarvis-desktop @@DESKTOP@@ flags=(unconfined) {
+  userns,
+
+  include if exists <local/jarvis-desktop>
+}
