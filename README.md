@@ -59,7 +59,7 @@ Restart the service after changing settings: `systemctl --user restart jarvis.se
 - **Important:** approved commands are *not sandboxed*. An approved executable can access anything your Linux account can access, regardless of granted folders. Inspect every proposed command before approving it. Do not expose the backend to the network; it has no authentication.
 - There is no streaming, cancellation, or per-conversation concurrent-turn coordination in this MVP. Avoid sending simultaneous requests to the same chat from different interfaces.
 - If the backend is interrupted while an LLM call is running, the last request may need to be retried. Chat messages persist; intermediate read-tool calls are not yet saved as separate audit events.
-- Desktop folder selection currently uses an absolute-path prompt, not a graphical folder picker.
+- Attach files or folders with the native GNOME picker (paperclip icon). Grants can be whole folders or individual files.
 
 ## Development
 
@@ -75,10 +75,98 @@ The desktop is a lightweight HTML frontend served by FastAPI. CLI and desktop bo
 
 `make uninstall` removes the desktop launcher, CLI symlink, and service but preserves config and conversations.
 
-## Provider adapters and per-conversation models
+## LLM backends (Ollama, OpenAI, Claude, …)
 
-Model identifiers use `provider/model-name`, for example `ollama/qwen3:8b`. The provider adapter owns HTTP transport and message formatting; the model name is independent of the adapter implementation. To support a new provider protocol, implement an adapter with `chat(messages, model, tools=None)` and register it in `ADAPTERS` in `local_agent/core.py`. Additional Ollama-compatible servers can be added under `providers` with `type: ollama` and a distinct provider key.
+Model identifiers use `provider/model-name`, e.g. `ollama/qwen3:8b`, `openai/gpt-5`,
+`anthropic/claude-sonnet-5-5`. Each provider in `~/.config/jarvis/config.yaml` names an
+adapter `type`:
+
+| type | backend |
+|---|---|
+| `ollama` | Local or remote Ollama |
+| `openai` | OpenAI, or any OpenAI-compatible server via `base_url` (LM Studio, vLLM, llama.cpp, OpenRouter…) |
+| `anthropic` | Anthropic Messages API (Claude) |
+
+See `config.example.yaml` for ready-to-uncomment entries. API keys come from environment
+variables (`api_key_env`, default `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`). For the desktop
+service put them in `~/.config/jarvis/env` (`chmod 600`), then re-run `make install` once so
+the service picks up the `EnvironmentFile`, and `systemctl --user restart jarvis.service`.
+`jarvis providers` shows which backends are reachable; the sidebar status light turns
+orange when one is offline.
+
+To add a new protocol, subclass `Adapter` in `local_agent/adapters.py`, implement
+`chat(messages, model, tools=None)` (and optionally `list_models()`), and decorate it with
+`@register("my-type")`. The internal message format is documented at the top of that file.
+
+## Projects and chats
+
+Chats can be renamed, deleted, and moved between projects (header icons, sidebar hover
+icons, or drag a chat onto a project). Chats inside a project share the project's
+instructions, folder grants, and recent turns from sibling chats (tunable under
+`projects:` in the config). CLI: `jarvis rename`, `jarvis delete`, `jarvis move`,
+`jarvis projects`, `jarvis project NAME`.
+
+## UI theme
+
+The UI follows a binding Tron theme documented in `docs/THEME.md`; styles live only in
+`web/theme.css` and icons only in `web/icons.js`.
 
 Use `jarvis models` to list locally discoverable models, `jarvis new "My task" --model ollama/qwen2.5-coder:7b` to pin a new conversation, and `jarvis model CHAT_ID auto` to restore automatic routing. In the desktop UI choose the model in the chat header. The selection is stored in SQLite and shared by the CLI and desktop. When pinned, the router is never called for that conversation.
 
 Existing installations: rename the old `~/.config/local-agent/config.yaml` to `~/.config/jarvis/config.yaml` and `~/.local/share/local-agent` to `~/.local/share/jarvis` to retain settings and history; adapt old `ollama_url` to the new `providers` format. Stop and uninstall the old local-agent user service before installing Jarvis to avoid port conflicts.
+
+### Complete Ubuntu provisioning
+
+`make provision` installs Ubuntu Python prerequisites, creates the Python environment,
+installs Jarvis dependencies, creates the user configuration (if absent), installs
+Ollama from its official installer if missing, starts the Ollama service when needed,
+and pulls missing models referenced in `models` in `~/.config/jarvis/config.yaml`.
+`make install` invokes `make provision` before creating desktop and CLI launchers.
+`make update-models` pulls newly configured models; `make check` checks availability
+without installing anything. Provisioning can require sudo and several gigabytes of
+model downloads. The official Ollama installer is a third-party script; review it
+before provisioning on a managed machine. Non-Ollama provider types are not
+provisioned automatically. Remote Ollama servers are never installed or modified.
+
+### Native desktop app (Ubuntu 24.04)
+
+Jarvis ships a real GNOME app: a GTK4 + libadwaita window hosting the UI in
+WebKitGTK (`local_agent/desktop.py`), not a browser tab. It runs with the system
+Python and these packages, which `make provision` installs:
+
+```bash
+sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0 zenity
+```
+
+`make install` registers it as `dev.jarvis.Jarvis` in the application launcher.
+Open Activities, search **Jarvis**, launch it, then right-click its dock icon and choose
+**Pin to Dash**. It is single-instance (launching again raises the window), starts the
+backend service if needed, remembers its window size, opens external links in your
+browser, and uses the native file chooser for attaching files and folders.
+Shortcuts: `Ctrl+N` new chat, `Ctrl+B` sidebar, `Ctrl+R` reload, `F11` fullscreen, `Ctrl+Q` quit.
+
+`jarvis desktop` launches the same app from a terminal; `jarvis desktop --browser`
+(also in the launcher's right-click menu) opens the old browser window instead. On
+NVIDIA GPUs the app sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` to avoid a blank window.
+
+### Instructions for AI models
+
+`AGENTS.md` holds the rules for any AI working on this repo (Claude, GPT/Codex,
+Ollama models); `CLAUDE.md` just imports it. Jarvis itself loads `AGENTS.md` /
+`CLAUDE.md` from the root of attached folders into the system prompt for whichever
+backend is active, so every model gets the same project instructions.
+
+### Jarvis identity and desktop icon
+
+`make install` prompts for a chat display name on first setup and stores it in
+`~/.config/jarvis/profile.json`. You can edit `display_name` later. The UI
+labels assistant messages **JARVIS** regardless of the selected underlying
+model. The cyan atom icon is used in the app, favicon, desktop launcher and
+loading animation. The desktop launcher uses a dedicated Chromium application
+window and XWayland WM_CLASS for more reliable GNOME dock grouping. If an old
+Jarvis dock favorite still displays the previous icon, remove it from Favorites,
+launch Jarvis again from Applications, then pin the new window.
+
+Messages are displayed immediately while Jarvis processes them; a rotating
+atom indicates that the request is still in flight. The animation respects
+reduced-motion preferences.

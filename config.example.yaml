@@ -1,7 +1,30 @@
+# Jarvis configuration: ~/.config/jarvis/config.yaml
+#
+# Backends ("providers") are referenced by model ids of the form provider/model,
+# e.g. ollama/qwen3:8b, openai/gpt-5, anthropic/claude-sonnet-5-5.
+# Supported adapter types: ollama, openai (also any OpenAI-compatible server), anthropic.
+# API keys are read from environment variables (api_key_env). For the desktop
+# service put them in ~/.config/jarvis/env (chmod 600), one KEY=value per line.
 providers:
   ollama:
     type: ollama
     base_url: http://127.0.0.1:11434
+
+  # openai:
+  #   type: openai
+  #   api_key_env: OPENAI_API_KEY
+  #   models: [gpt-5, gpt-5-mini]        # optional; otherwise discovered from /v1/models
+
+  # anthropic:
+  #   type: anthropic
+  #   api_key_env: ANTHROPIC_API_KEY
+  #   max_tokens: 4096
+  #   models: [claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5]
+
+  # lmstudio:                             # any OpenAI-compatible local server
+  #   type: openai
+  #   base_url: http://127.0.0.1:1234/v1
+
 default_provider: ollama
 models:
   general: ollama/qwen3:8b
@@ -13,6 +36,9 @@ agent:
   max_steps: 8
   max_file_bytes: 100000
   command_timeout_seconds: 30
+projects:
+  shared_messages: 24          # recent turns from sibling chats shared into each project chat
+  shared_chars_per_message: 800
 server:
   host: 127.0.0.1
   port: 8765

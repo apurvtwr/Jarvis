@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Jarvis
-Comment=Local Ollama AI agent
-Exec=@@EXEC@@ desktop
-Terminal=false
-Categories=Development;Utility;
-Icon=utilities-terminal

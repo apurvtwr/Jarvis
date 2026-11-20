@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import webbrowser
@@ -20,15 +21,54 @@ def serve():
     cfg = core.config()["server"]
     uvicorn.run("local_agent.server:app", host=cfg["host"], port=cfg["port"])
 
+SYSTEM_PYTHON = "/usr/bin/python3"
+DESKTOP_SHELL = Path(__file__).resolve().with_name("desktop.py")
+
+
+def desktop_env():
+    # The native shell uses the system PyGObject; keep ROS/venv paths out of it.
+    env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}}
+    return env
+
+
 @app.command()
-def desktop():
-    """Open desktop interface (start `jarvis serve` first)."""
+def desktop(browser: bool = typer.Option(False, "--browser", help="Open in a browser window instead of the native app")):
+    """Open the Jarvis desktop app (starts the backend service if needed)."""
     cfg = core.config()["server"]
     url = f"http://{cfg['host']}:{cfg['port']}"
-    for browser in ("chromium", "google-chrome", "chromium-browser"):
-        from shutil import which
-        if which(browser):
-            subprocess.Popen([browser, f"--app={url}"])
+    if not browser and Path(SYSTEM_PYTHON).exists():
+        check = subprocess.run([SYSTEM_PYTHON, str(DESKTOP_SHELL), "--check"], env=desktop_env())
+        if check.returncode == 0:
+            # Exec the script itself (not python3 script) so its AppArmor profile attaches.
+            os.execve(str(DESKTOP_SHELL), [str(DESKTOP_SHELL), "--url", url], desktop_env())
+        typer.echo("Native desktop libraries missing; falling back to a browser window.\n"
+                   "Install them with: sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0", err=True)
+    open_browser_window(url)
+
+
+def open_browser_window(url):
+    import time
+    from shutil import which
+    from urllib.request import urlopen
+    try:
+        with urlopen(url, timeout=1) as response:
+            if response.status >= 400:
+                raise RuntimeError(f"Backend returned {response.status}")
+    except Exception:
+        subprocess.run(["systemctl", "--user", "start", "jarvis.service"], check=False)
+        for _ in range(30):
+            try:
+                with urlopen(url, timeout=1):
+                    break
+            except Exception:
+                time.sleep(0.3)
+        else:
+            typer.echo("Jarvis backend is unavailable; inspect journalctl --user -u jarvis", err=True)
+            raise typer.Exit(code=1)
+    for name in ("chromium", "google-chrome", "chromium-browser", "google-chrome-stable", "brave-browser"):
+        if which(name):
+            subprocess.Popen([name, f"--app={url}", "--class=jarvis-app", "--name=jarvis-app",
+                              "--user-data-dir=" + str(Path.home() / ".local/share/jarvis/browser-profile")])
             return
     webbrowser.open(url)
 
@@ -43,10 +83,10 @@ def new(title: str = "New chat", folder: list[Path] = typer.Option(None, "--fold
 @app.command()
 def chats():
     """List conversations."""
-    table = Table("ID", "Title", "Created")
-    with core.db() as con:
-        for row in con.execute("SELECT * FROM conversations ORDER BY created DESC"):
-            table.add_row(row["id"], row["title"], row["created"][:19])
+    table = Table("ID", "Title", "Project", "Created")
+    names = {p["id"]: p["name"] for p in core.projects()}
+    for row in core.conversations():
+        table.add_row(row["id"], row["title"], names.get(row["project_id"], ""), row["created"][:19])
     console.print(table)
 
 @app.command()
@@ -65,6 +105,50 @@ def models():
     """List models available through configured providers."""
     for name in core.available_models():
         console.print(name)
+
+@app.command()
+def rename(chat_id: str, title: str):
+    """Rename a conversation."""
+    core.rename_conversation(chat_id, title)
+    console.print(title)
+
+@app.command()
+def delete(chat_id: str, yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation")):
+    """Permanently delete a conversation and its history."""
+    title = core.get_conversation(chat_id)["title"]
+    if not yes and not typer.confirm(f"Delete '{title}' permanently?"):
+        raise typer.Exit()
+    core.delete_conversation(chat_id)
+    console.print(f"Deleted {title}")
+
+@app.command()
+def move(chat_id: str, project_id: str = typer.Argument(None, help="Target project id; omit to remove from its project")):
+    """Move a conversation into a project (or out of one)."""
+    core.move_conversation(chat_id, project_id)
+    console.print(project_id or "No project")
+
+@app.command()
+def projects():
+    """List projects."""
+    table = Table("ID", "Name", "Chats")
+    chats = core.conversations()
+    for p in core.projects():
+        table.add_row(p["id"], p["name"], str(sum(c["project_id"] == p["id"] for c in chats)))
+    console.print(table)
+
+@app.command()
+def project(name: str, context: str = typer.Option("", "--context", help="Instructions shared by the project's chats")):
+    """Create a project."""
+    console.print(core.create_project(name, context))
+
+@app.command()
+def providers():
+    """Show configured LLM backends and whether they are reachable."""
+    table = Table("Provider", "Type", "Status", "Models")
+    for item in core.provider_status():
+        status = "[green]ok[/green]" if item["ok"] else f"[red]{item['error'][:60]}[/red]"
+        table.add_row(item["name"], item["type"] or "?", status, str(len(item["models"])))
+    console.print(table)
 
 @app.command()
 def chat(chat_id: str, model: str = "auto"):

@@ -1,0 +1,21 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Jarvis
+GenericName=AI Assistant
+Comment=Jarvis personal AI command center
+Exec=env -u PYTHONPATH @@DESKTOP@@
+TryExec=@@DESKTOP@@
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=dev.jarvis.Jarvis
+DBusActivatable=false
+SingleMainWindow=true
+Icon=jarvis
+Keywords=AI;Assistant;Ollama;OpenAI;Claude;Chat;
+Actions=browser;
+
+[Desktop Action browser]
+Name=Open in Browser
+Exec=@@EXEC@@ desktop --browser
