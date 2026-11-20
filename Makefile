@@ -13,7 +13,8 @@ help:
 	@echo 'make uninstall   Remove launchers and user service (keep chats)'
 provision:
 	sudo apt-get update
-	sudo apt-get install -y python3-venv python3-pip curl ca-certificates
+	sudo apt-get install -y python3-venv python3-pip curl ca-certificates \
+		python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0 zenity
 	env -u PYTHONPATH $(PYTHON) -m venv $(VENV)
 	env -u PYTHONPATH $(BIN)/python -m pip install --upgrade pip
 	env -u PYTHONPATH $(BIN)/python -m pip install -e .
@@ -35,7 +36,9 @@ install: provision
 	@for size in 64 128 256; do mkdir -p $(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps; cp packaging/jarvis-$$size.png $(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/jarvis.png; done
 	ln -sfn $(abspath $(BIN)/jarvis) $(HOME)/.local/bin/jarvis
 	@sed 's|@@EXEC@@|$(abspath $(BIN)/jarvis)|g' packaging/jarvis.service.in > $(HOME)/.config/systemd/user/jarvis.service
-	@sed 's|@@EXEC@@|$(abspath $(BIN)/jarvis)|g' packaging/jarvis.desktop.in > $(HOME)/.local/share/applications/jarvis.desktop
+	@sed -e 's|@@EXEC@@|$(abspath $(BIN)/jarvis)|g' -e 's|@@DESKTOP@@|$(abspath local_agent/desktop.py)|g' packaging/dev.jarvis.Jarvis.desktop.in > $(HOME)/.local/share/applications/dev.jarvis.Jarvis.desktop
+	rm -f $(HOME)/.local/share/applications/jarvis.desktop
+	-update-desktop-database $(HOME)/.local/share/applications 2>/dev/null
 	-gtk-update-icon-cache -f $(HOME)/.local/share/icons/hicolor 2>/dev/null
 	systemctl --user daemon-reload
 	systemctl --user enable jarvis.service
@@ -51,7 +54,7 @@ test:
 	env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 $(BIN)/pytest -q
 uninstall:
 	-systemctl --user disable --now jarvis.service
-	rm -f $(HOME)/.local/bin/jarvis $(HOME)/.config/systemd/user/jarvis.service $(HOME)/.local/share/applications/jarvis.desktop $(HOME)/.local/share/icons/hicolor/scalable/apps/jarvis.svg
+	rm -f $(HOME)/.local/bin/jarvis $(HOME)/.config/systemd/user/jarvis.service $(HOME)/.local/share/applications/jarvis.desktop $(HOME)/.local/share/applications/dev.jarvis.Jarvis.desktop $(HOME)/.local/share/icons/hicolor/scalable/apps/jarvis.svg
 	@for size in 64 128 256; do rm -f $(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/jarvis.png; done
 	systemctl --user daemon-reload
 clean:

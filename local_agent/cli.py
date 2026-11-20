@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import webbrowser
@@ -20,16 +21,34 @@ def serve():
     cfg = core.config()["server"]
     uvicorn.run("local_agent.server:app", host=cfg["host"], port=cfg["port"])
 
+SYSTEM_PYTHON = "/usr/bin/python3"
+DESKTOP_SHELL = Path(__file__).resolve().with_name("desktop.py")
+
+
+def desktop_env():
+    # The native shell uses the system PyGObject; keep ROS/venv paths out of it.
+    env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}}
+    return env
+
+
 @app.command()
-def desktop():
-    """Open desktop interface (start `jarvis serve` first)."""
+def desktop(browser: bool = typer.Option(False, "--browser", help="Open in a browser window instead of the native app")):
+    """Open the Jarvis desktop app (starts the backend service if needed)."""
     cfg = core.config()["server"]
     url = f"http://{cfg['host']}:{cfg['port']}"
-    # Prefer an isolated browser app window with its own desktop identity.
-    import os
+    if not browser and Path(SYSTEM_PYTHON).exists():
+        check = subprocess.run([SYSTEM_PYTHON, str(DESKTOP_SHELL), "--check"], env=desktop_env())
+        if check.returncode == 0:
+            os.execve(SYSTEM_PYTHON, [SYSTEM_PYTHON, str(DESKTOP_SHELL), "--url", url], desktop_env())
+        typer.echo("Native desktop libraries missing; falling back to a browser window.\n"
+                   "Install them with: sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0", err=True)
+    open_browser_window(url)
+
+
+def open_browser_window(url):
     import time
-    from urllib.request import urlopen
     from shutil import which
+    from urllib.request import urlopen
     try:
         with urlopen(url, timeout=1) as response:
             if response.status >= 400:
@@ -45,11 +64,10 @@ def desktop():
         else:
             typer.echo("Jarvis backend is unavailable; inspect journalctl --user -u jarvis", err=True)
             raise typer.Exit(code=1)
-    for browser in ("chromium", "google-chrome", "chromium-browser", "google-chrome-stable", "brave-browser"):
-
-        from shutil import which
-        if which(browser):
-            subprocess.Popen([browser, f"--app={url}", "--ozone-platform=x11", "--class=jarvis-app", "--name=jarvis-app", "--user-data-dir=" + str(Path.home() / ".local/share/jarvis/browser-profile")])
+    for name in ("chromium", "google-chrome", "chromium-browser", "google-chrome-stable", "brave-browser"):
+        if which(name):
+            subprocess.Popen([name, f"--app={url}", "--class=jarvis-app", "--name=jarvis-app",
+                              "--user-data-dir=" + str(Path.home() / ".local/share/jarvis/browser-profile")])
             return
     webbrowser.open(url)
 

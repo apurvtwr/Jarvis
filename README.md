@@ -59,7 +59,7 @@ Restart the service after changing settings: `systemctl --user restart jarvis.se
 - **Important:** approved commands are *not sandboxed*. An approved executable can access anything your Linux account can access, regardless of granted folders. Inspect every proposed command before approving it. Do not expose the backend to the network; it has no authentication.
 - There is no streaming, cancellation, or per-conversation concurrent-turn coordination in this MVP. Avoid sending simultaneous requests to the same chat from different interfaces.
 - If the backend is interrupted while an LLM call is running, the last request may need to be retried. Chat messages persist; intermediate read-tool calls are not yet saved as separate audit events.
-- Desktop folder selection currently uses an absolute-path prompt, not a graphical folder picker.
+- Attach files or folders with the native GNOME picker (paperclip icon). Grants can be whole folders or individual files.
 
 ## Development
 
@@ -128,9 +128,33 @@ model downloads. The official Ollama installer is a third-party script; review i
 before provisioning on a managed machine. Non-Ollama provider types are not
 provisioned automatically. Remote Ollama servers are never installed or modified.
 
-### Ubuntu desktop launcher and pinning
+### Native desktop app (Ubuntu 24.04)
 
-Run `make install` to register Jarvis in the GNOME application launcher and install its custom cyan icon. Open Activities, search **Jarvis**, launch it, then right-click its dock icon and select **Add to Favorites**. The launcher uses a standalone Chromium/Chrome app window when available; if no compatible browser is installed, it falls back to the default browser. Install Chromium (`sudo snap install chromium`) or Chrome to get a dedicated app window. On some browser/Wayland combinations GNOME may group the window with the browser instead of Jarvis; the launcher itself remains independently pinnable. `jarvis desktop` attempts to start the user service before opening the window.
+Jarvis ships a real GNOME app: a GTK4 + libadwaita window hosting the UI in
+WebKitGTK (`local_agent/desktop.py`), not a browser tab. It runs with the system
+Python and these packages, which `make provision` installs:
+
+```bash
+sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-webkit-6.0 zenity
+```
+
+`make install` registers it as `dev.jarvis.Jarvis` in the application launcher.
+Open Activities, search **Jarvis**, launch it, then right-click its dock icon and choose
+**Pin to Dash**. It is single-instance (launching again raises the window), starts the
+backend service if needed, remembers its window size, opens external links in your
+browser, and uses the native file chooser for attaching files and folders.
+Shortcuts: `Ctrl+N` new chat, `Ctrl+B` sidebar, `Ctrl+R` reload, `F11` fullscreen, `Ctrl+Q` quit.
+
+`jarvis desktop` launches the same app from a terminal; `jarvis desktop --browser`
+(also in the launcher's right-click menu) opens the old browser window instead. On
+NVIDIA GPUs the app sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` to avoid a blank window.
+
+### Instructions for AI models
+
+`AGENTS.md` holds the rules for any AI working on this repo (Claude, GPT/Codex,
+Ollama models); `CLAUDE.md` just imports it. Jarvis itself loads `AGENTS.md` /
+`CLAUDE.md` from the root of attached folders into the system prompt for whichever
+backend is active, so every model gets the same project instructions.
 
 ### Jarvis identity and desktop icon
 

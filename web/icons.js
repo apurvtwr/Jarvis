@@ -8,6 +8,7 @@ const ICONS = {
   'folder':      '<path d="M3 6.5h6l2 2h10V18H3z"/>',
   'folder-plus': '<path d="M3 6.5h6l2 2h10V18H3z"/><path d="M12 10.5v5M9.5 13h5"/>',
   'folder-open': '<path d="M3 18V6.5h6l2 2h8V11"/><path d="M3 18l3-7h15l-3 7z"/>',
+  'file':        '<path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 12h6M9 16h6"/>',
   'move':        '<path d="M3 6.5h6l2 2h10V18H3z"/><path d="M8.5 13.5h7M13 11l2.5 2.5L13 16"/>',
   'inbox':       '<path d="M3 13l3-8h12l3 8v6H3z"/><path d="M3 13h5l1.5 2.5h5L16 13h5"/>',
   'sidebar':     '<rect x="3" y="4" width="18" height="16" rx="1"/><path d="M9 4v16"/><path d="M5.5 8h1.5M5.5 11h1.5"/>',

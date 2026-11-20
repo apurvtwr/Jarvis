@@ -165,3 +165,42 @@ def test_register_custom_adapter_and_approval_flow(tmp_path, monkeypatch):
         assert seen[-1]["tool_call_id"] == "w1"
     finally:
         adapters.ADAPTERS.pop("fake", None)
+
+
+def test_file_grants(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "HOME", tmp_path / "data")
+    doc = tmp_path / "notes.txt"
+    doc.write_text("hi")
+    sibling = tmp_path / "secret.txt"
+    sibling.write_text("no")
+    cid = core.create_conversation()
+    core.add_folder(cid, str(doc))
+    assert core.tool_execute(cid, "read_file", {"path": str(doc)}) == "hi"
+    with pytest.raises(ValueError):
+        core.allowed_path(cid, str(sibling))
+    with pytest.raises(ValueError):
+        core.add_folder(cid, str(tmp_path / "missing"))
+    with pytest.raises(ValueError):
+        core.add_folder(cid, "/")
+
+
+def test_workspace_instructions_reach_every_backend(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "HOME", tmp_path / "data")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "AGENTS.md").write_text("Always use the Tron theme.")
+    (repo / "CLAUDE.md").write_text("@AGENTS.md\n<!-- pointer only -->\n")
+    cid = core.create_conversation()
+    core.add_folder(cid, str(repo))
+    prompt = core.system_prompt(cid)
+    assert "Always use the Tron theme." in prompt
+    assert prompt.count("Always use the Tron theme.") == 1
+    assert "CLAUDE.md ---" not in prompt  # import-only file adds nothing
+
+
+def test_pick_endpoint_without_display(monkeypatch):
+    from fastapi.testclient import TestClient
+    from local_agent.server import app
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    assert TestClient(app).post("/api/pick", json={"kind": "folder"}).status_code == 501

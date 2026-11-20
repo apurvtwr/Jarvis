@@ -15,6 +15,9 @@ class ChatRequest(BaseModel):
     model: str = "auto"
 class FolderRequest(BaseModel):
     path: str
+class PickRequest(BaseModel):
+    kind: str = "folder"
+    multiple: bool = True
 class ApprovalRequest(BaseModel):
     accept: bool
 class NewRequest(BaseModel):
@@ -99,7 +102,7 @@ def select_model(cid: str, req: ModelRequest):
 
 @app.get("/api/version")
 def version():
-    return {"app": "jarvis", "features": ["projects", "project-folders", "chat-renaming", "chat-delete", "project-delete", "providers", "themed-dialogs"]}
+    return {"app": "jarvis", "features": ["projects", "project-folders", "chat-renaming", "chat-delete", "project-delete", "providers", "themed-dialogs", "file-picker", "file-grants"]}
 
 @app.get("/api/projects")
 def list_projects():
@@ -140,3 +143,21 @@ def delete_project(pid: str, delete_chats: bool = False):
 @app.get("/api/providers")
 def providers():
     return core.provider_status()
+
+@app.post("/api/pick")
+def pick(req: PickRequest):
+    """Fallback native picker for browser mode (the desktop app uses its own GTK dialog).
+    JSON-only body, so browsers block cross-site calls via CORS preflight."""
+    import os
+    import shutil
+    import subprocess
+    if not shutil.which("zenity") or not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        raise HTTPException(501, "No graphical file picker is available to the Jarvis service")
+    args = ["zenity", "--file-selection", "--separator=\n", "--filename=" + str(Path.home()) + "/",
+            "--title=" + ("Attach folder" if req.kind == "folder" else "Attach files")]
+    if req.kind == "folder":
+        args.append("--directory")
+    if req.multiple:
+        args.append("--multiple")
+    result = subprocess.run(args, capture_output=True, text=True)
+    return {"paths": [line for line in result.stdout.splitlines() if line.strip()] if result.returncode == 0 else []}

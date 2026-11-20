@@ -1,6 +1,6 @@
 # Jarvis visual theme — TRON
 
-**Status: binding.** Every UI change (desktop web UI, dialogs, icons, launcher
+**Status: binding** for every AI model and human (see `AGENTS.md`). Every UI change (desktop web UI, dialogs, icons, launcher
 art, future clients) must follow this document. If a request seems to need a
 different look, extend this theme — do not introduce a second one. Changes to
 the theme itself must be made here first, then in `web/theme.css`.
@@ -23,6 +23,7 @@ glowing light-lines, precise geometry, and energy that means something.
 | Icons              | `web/icons.js`     | Only icon source. Add glyphs to `ICONS`; render with `icon()` / `iconButton()` / `data-icon`. |
 | Markup             | `web/index.html`   | Structure only. No `style=` attributes, no `<style>` blocks. |
 | Behaviour          | `web/app.js`       | Uses `openDialog()` / `showError()` — never `alert`, `confirm`, `prompt`. |
+| Native window chrome | `local_agent/desktop.py` (`WINDOW_CSS`) | Header bar uses `--bg-0`, cyan `JARVIS` title; libadwaita forced dark. |
 | App/launcher icon  | `packaging/jarvis.svg` (+ PNGs) | Cyan atom on dark. |
 
 ## Palette (tokens in `web/theme.css`)

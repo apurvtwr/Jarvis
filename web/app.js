@@ -302,13 +302,54 @@ $('model').addEventListener('change', async () => {
   if (current) try { await api('/chats/' + current + '/model', 'PUT', { model: $('model').value }); } catch (e) { showError('Request unsuccessful', e.message); }
 });
 
-async function grantFolder() {
-  if (!current) return showError('No conversation selected', 'Create a chat first, then attach a folder.');
+/* Native picker: GTK dialog inside the desktop app, zenity via the service in browser mode.
+   Resolves to an array of absolute paths ([] if cancelled); throws if no picker is available. */
+async function pickPaths(kind) {
+  if (window.jarvisDesktop?.native) return (await window.jarvisDesktop.pick(kind, true))?.paths || [];
+  return (await api('/pick', 'POST', { kind, multiple: true })).paths || [];
+}
+
+function grantTarget() {
   const c = chatById(current); const p = c?.project_id && projectById(c.project_id);
-  openDialog({ eyebrow: 'JARVIS / WORKSPACE', eyebrowIcon: 'attach', heading: 'Attach a folder',
-    description: p ? `The folder is shared with every chat in “${p.name}”.` : 'Only this chat gets access to the folder.',
-    field: { label: 'ABSOLUTE FOLDER PATH', placeholder: '/home/you/projects/robot' }, submit: { icon: 'attach', label: 'Attach folder' },
-    onSubmit: async path => { await api(p ? '/projects/' + p.id + '/folders' : '/chats/' + current + '/folders', 'POST', { path }); await refreshDetail(true); } });
+  return { p, endpoint: p ? '/projects/' + p.id + '/folders' : '/chats/' + current + '/folders' };
+}
+
+async function attachPaths(paths) {
+  const { endpoint } = grantTarget(); const failed = [];
+  for (const path of paths) { try { await api(endpoint, 'POST', { path }); } catch (e) { failed.push(path + ': ' + e.message); } }
+  await refreshDetail(true);
+  if (failed.length) showError('Some items could not be attached', failed.join('\n'));
+}
+
+function grantFolder() {
+  if (!current) return showError('No conversation selected', 'Create a chat first, then attach files or folders.');
+  const { p } = grantTarget();
+  const list = el('div', 'choice-list');
+  const choice = (iconName, label, hint, onPick) => {
+    const b = el('button', 'choice'); b.type = 'button';
+    b.append(icon(iconName, 16), el('span', '', label), el('span', 'hint', hint));
+    b.onclick = onPick; list.append(b);
+  };
+  const viaPicker = kind => async () => {
+    closeDialog();
+    let paths;
+    try { paths = await pickPaths(kind); }
+    catch (e) { return typePath(e.message); }
+    if (paths.length) await attachPaths(paths);
+  };
+  choice('folder-open', 'Folder', 'browse', viaPicker('folder'));
+  choice('file', 'Files', 'browse', viaPicker('file'));
+  choice('pencil', 'Type a path', 'manual', () => typePath());
+  openDialog({ eyebrow: 'JARVIS / WORKSPACE', eyebrowIcon: 'attach', heading: 'Attach to this chat',
+    description: p ? `Attached items are shared with every chat in “${p.name}”.` : 'Only this chat gets access to what you attach.',
+    body: list, submit: null });
+}
+
+function typePath(reason = '') {
+  openDialog({ eyebrow: 'JARVIS / WORKSPACE', eyebrowIcon: 'attach', heading: 'Attach by path',
+    description: (reason ? reason + '. ' : '') + 'Enter the absolute path of a file or folder.',
+    field: { label: 'ABSOLUTE PATH', placeholder: '/home/you/projects/robot' }, submit: { icon: 'attach', label: 'Attach' },
+    onSubmit: async path => { await api(grantTarget().endpoint, 'POST', { path }); await refreshDetail(true); } });
 }
 
 async function send() {
