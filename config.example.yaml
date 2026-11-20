@@ -1,0 +1,18 @@
+providers:
+  ollama:
+    type: ollama
+    base_url: http://127.0.0.1:11434
+default_provider: ollama
+models:
+  general: ollama/qwen3:8b
+  code: ollama/qwen2.5-coder:7b
+  router: ollama/qwen3:8b
+routing:
+  mode: heuristic
+agent:
+  max_steps: 8
+  max_file_bytes: 100000
+  command_timeout_seconds: 30
+server:
+  host: 127.0.0.1
+  port: 8765
