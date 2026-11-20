@@ -8,7 +8,12 @@ HTTP API, so the backend can run locally or in the cloud. Where to connect is
         url: https://jarvis.example.com
         token: <bearer token>          # or token_env: JARVIS_TOKEN
 
-Environment overrides: JARVIS_URL, JARVIS_TOKEN. With nothing configured the
+        runner_token_env: JARVIS_RUNNER_TOKEN   # `jarvis runner` only; default: token
+        runner:                         # what `jarvis runner` exposes on this machine
+          allow: [~/projects]           # default: the home directory
+          allow_commands: true
+
+Environment overrides: JARVIS_URL, JARVIS_TOKEN, JARVIS_RUNNER_TOKEN. With nothing configured the
 client uses the local backend from config.yaml (http://127.0.0.1:8765).
 """
 import ipaddress
@@ -34,6 +39,20 @@ def client_settings():
         url = f"http://{server['host']}:{server['port']}"
     token = os.environ.get("JARVIS_TOKEN") or data.get("token") or (os.environ.get(data["token_env"]) if data.get("token_env") else None)
     return {"url": url.rstrip("/"), "token": token}
+
+
+def runner_settings():
+    """Settings for `jarvis runner`: where to connect, its token and the local policy."""
+    data = {}
+    if CLIENT_CONFIG.exists():
+        data = yaml.safe_load(CLIENT_CONFIG.read_text()) or {}
+    base = client_settings()
+    token = (os.environ.get("JARVIS_RUNNER_TOKEN") or data.get("runner_token")
+             or (os.environ.get(data["runner_token_env"]) if data.get("runner_token_env") else None) or base["token"])
+    policy = data.get("runner") or {}
+    return {"url": base["url"], "token": token, "allow": policy.get("allow") or [],
+            "deny": policy.get("deny"), "allow_commands": policy.get("allow_commands", True),
+            "limits": {k: policy[k] for k in ("max_file_bytes", "command_timeout_seconds") if k in policy}}
 
 
 def is_local_url(url):

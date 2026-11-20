@@ -2,13 +2,16 @@ import json
 import os
 import re
 import sqlite3
-import subprocess
+import posixpath
+import threading
 import uuid
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
+from . import tools
 from .adapters import ADAPTERS, get_adapter  # noqa: F401  (ADAPTERS re-exported for extensions)
 
 HOME = Path(os.environ.get("LOCAL_AGENT_HOME", Path.home() / ".local/share/jarvis"))
@@ -22,8 +25,8 @@ DEFAULT = {
     "projects": {"shared_messages": 24, "shared_chars_per_message": 800},
     "server": {"host": "127.0.0.1", "port": 8765, "auth_token": None},
     # Where agent tools (read/write/run) execute. "server" = on the machine running the
-    # backend. A future "runner" executor will execute them on the user's own machine.
-    "tools": {"executor": "server"},
+    # backend; "runner" = on the user's machine via `jarvis runner` (docs/ARCHITECTURE.md).
+    "tools": {"executor": "server", "runner_timeout_seconds": 60},
 }
 
 def config():
@@ -56,6 +59,10 @@ def db():
     for column in ("project_id", "run_status", "run_error"):
         if column not in columns:
             con.execute(f"ALTER TABLE conversations ADD COLUMN {column} TEXT")
+    # Grants made through a runner remember which machine the path lives on.
+    for table in ("folders", "project_folders"):
+        if "runner_id" not in {r[1] for r in con.execute(f"PRAGMA table_info({table})")}:
+            con.execute(f"ALTER TABLE {table} ADD COLUMN runner_id TEXT")
     return con
 
 def now():
@@ -91,25 +98,28 @@ def update_project(pid, name=None, context=None):
         if context is not None:
             con.execute("UPDATE projects SET context=? WHERE id=?", (context, pid))
 
-def grantable(path):
-    """Resolve a user-chosen file or folder for access grants."""
-    try:
-        p = Path(path).expanduser().resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise ValueError(f"Path does not exist: {path}") from None
-    if not (p.is_dir() or p.is_file()):
-        raise ValueError("Only regular files and folders can be attached")
-    if p == Path(p.anchor):
-        raise ValueError("Attaching the whole filesystem is not allowed")
-    return p
+grantable = tools.grantable
 
 
-def add_project_folder(pid, path):
+def resolve_grant(path, runner_id=None):
+    """Resolve a grant on the machine where tools run. Returns (path, runner_id)."""
+    if executor().location != "runner":
+        return str(grantable(path)), None
+    if not runner_id:
+        connected = RUNNERS.list()
+        if len(connected) != 1:
+            raise ValueError("No runner connected: start `jarvis runner` on the computer with the files" if not connected
+                             else "Several runners are connected; choose which computer the path is on")
+        runner_id = connected[0]["id"]
+    return RUNNERS.call(runner_id, "resolve", {"path": path}, [], runner_timeout()), runner_id
+
+
+def add_project_folder(pid, path, runner_id=None):
     project_detail(pid)
-    p = grantable(path)
+    p, rid = resolve_grant(path, runner_id)
     with db() as con:
-        con.execute("INSERT OR IGNORE INTO project_folders VALUES (?,?)", (pid, str(p)))
-    return str(p)
+        con.execute("INSERT OR REPLACE INTO project_folders(project_id,path,runner_id) VALUES (?,?,?)", (pid, p, rid))
+    return p
 
 def rename_conversation(cid, title):
     title = title.strip()
@@ -138,18 +148,24 @@ def require_conversation(con, cid):
     if not con.execute("SELECT 1 FROM conversations WHERE id=?", (cid,)).fetchone():
         raise ValueError("Unknown conversation")
 
-def add_folder(cid, path):
-    p = grantable(path)
+def add_folder(cid, path, runner_id=None):
     with db() as con:
         require_conversation(con, cid)
-        con.execute("INSERT OR IGNORE INTO folders VALUES (?,?)", (cid, str(p)))
-    return str(p)
+    p, rid = resolve_grant(path, runner_id)
+    with db() as con:
+        con.execute("INSERT OR REPLACE INTO folders(conversation_id,path,runner_id) VALUES (?,?,?)", (cid, p, rid))
+    return p
+
+def grants(cid):
+    """Chat + project grants as [{"path", "runner_id"}] (runner_id is None for server grants)."""
+    with db() as con:
+        require_conversation(con, cid)
+        rows = con.execute("SELECT path,runner_id FROM folders WHERE conversation_id=? UNION SELECT path,runner_id FROM project_folders "
+                           "WHERE project_id=(SELECT project_id FROM conversations WHERE id=?)", (cid, cid))
+        return [{"path": r[0], "runner_id": r[1]} for r in rows]
 
 def folders(cid):
-    with db() as con:
-        require_conversation(con, cid)
-        rows = con.execute("SELECT path FROM folders WHERE conversation_id=? UNION SELECT path FROM project_folders WHERE project_id=(SELECT project_id FROM conversations WHERE id=?)", (cid, cid))
-        return [r[0] for r in rows]
+    return list(dict.fromkeys(g["path"] for g in grants(cid)))
 
 def project_context(cid):
     """Context shared by every chat in the same project: instructions plus recent
@@ -203,47 +219,10 @@ def delete_project(pid, delete_chats=False):
 
 def allowed_path(cid, path):
     # All filesystem tools are restricted to explicit conversation grants.
-    p = Path(path).expanduser().resolve()
-    if not any(p.is_relative_to(Path(root)) for root in folders(cid)):
-        raise ValueError("Path is outside granted folders")
-    return p
+    return tools.within(path, folders(cid))
 
 def tool_execute(cid, name, args):
-    if name == "list_files":
-        p = allowed_path(cid, args["path"])
-        if not p.is_dir():
-            raise ValueError("Not a directory")
-        return json.dumps([{"name": x.name, "directory": x.is_dir()} for x in list(p.iterdir())[:200]])
-    if name == "read_file":
-        p = allowed_path(cid, args["path"])
-        if not p.is_file():
-            raise ValueError("Not a file")
-        if p.stat().st_size > config()["agent"]["max_file_bytes"]:
-            raise ValueError("File too large")
-        return p.read_text(errors="replace")
-    if name == "write_file":
-        p = allowed_path(cid, args["path"])
-        if not p.parent.is_dir():
-            raise ValueError("Parent directory does not exist")
-        if len(args["content"].encode()) > config()["agent"]["max_file_bytes"]:
-            raise ValueError("Content too large")
-        p.write_text(args["content"])
-        return f"Wrote {p}"
-    if name == "run_command":
-        cwd = allowed_path(cid, args["cwd"])
-        if not cwd.is_dir():
-            raise ValueError("Working directory must exist")
-        # Shell is deliberately disabled. Arguments are passed as an argv array.
-        argv = args["argv"]
-        if not isinstance(argv, list) or not argv or not all(isinstance(x, str) for x in argv):
-            raise ValueError("argv must be a nonempty string array")
-        if Path(argv[0]).name in {"sudo", "su", "pkexec", "doas"}:
-            raise ValueError("Privilege escalation is disabled")
-        result = subprocess.run(argv, cwd=cwd, text=True, capture_output=True,
-                                timeout=config()["agent"]["command_timeout_seconds"],
-                                stdin=subprocess.DEVNULL, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
-        return json.dumps({"exit_code": result.returncode, "stdout": result.stdout[:12000], "stderr": result.stderr[:12000]})
-    raise ValueError("Unknown tool")
+    return tools.execute(name, args, lambda path: allowed_path(cid, path), config()["agent"])
 
 APPROVAL_TOOLS = {"write_file", "run_command"}
 
@@ -262,7 +241,125 @@ class ServerExecutor:
         return tool_execute(cid, name, args)
 
 
-EXECUTORS = {"server": ServerExecutor}
+class RunnerConnection:
+    def __init__(self, runner_id, hostname, send, close=None):
+        self.id, self.hostname, self.send, self.close = runner_id, hostname, send, close
+        self.since = now()
+
+
+class RunnerRegistry:
+    """Runners connected over /api/runners/connect. Thread-safe: the agent loop runs in
+    worker threads, the WebSocket lives on the event loop. ``send(msg)`` must be safe
+    to call from any thread; results come back through ``deliver``."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.conns = {}
+        self.pending = {}   # call_id -> (conn, Future)
+
+    def register(self, runner_id, hostname, send, close=None):
+        conn = RunnerConnection(runner_id, hostname, send, close)
+        with self.lock:
+            old = self.conns.get(runner_id)
+            self.conns[runner_id] = conn
+        if old:  # same runner reconnected: the old socket is stale
+            self._fail(old, "Runner reconnected")
+            if old.close:
+                try:
+                    old.close()
+                except Exception:
+                    pass
+        return conn
+
+    def unregister(self, conn):
+        with self.lock:
+            if self.conns.get(conn.id) is conn:
+                del self.conns[conn.id]
+        self._fail(conn, f"Runner {conn.hostname} disconnected")
+
+    def _fail(self, conn, reason):
+        with self.lock:
+            lost = [cid for cid, (c, _) in self.pending.items() if c is conn]
+            futures = [self.pending.pop(cid)[1] for cid in lost]
+        for fut in futures:
+            if not fut.done():
+                fut.set_exception(ValueError(reason))
+
+    def list(self):
+        with self.lock:
+            return [{"id": c.id, "hostname": c.hostname, "connected_since": c.since} for c in self.conns.values()]
+
+    def deliver(self, conn, msg):
+        call_id = msg.get("call_id")
+        with self.lock:
+            entry = self.pending.get(call_id)
+            if not entry or entry[0] is not conn:  # only the runner we asked may answer
+                return
+            del self.pending[call_id]
+        if msg.get("ok"):
+            entry[1].set_result(str(msg.get("result", "")))
+        else:
+            entry[1].set_exception(ValueError(str(msg.get("error") or "Runner error")))
+
+    def call(self, runner_id, tool, args, grant_paths, timeout):
+        with self.lock:
+            conn = self.conns.get(runner_id)
+        if conn is None:
+            raise ValueError("The runner for this folder is not connected: start `jarvis runner` on that computer")
+        call_id = uuid.uuid4().hex
+        fut = Future()
+        with self.lock:
+            self.pending[call_id] = (conn, fut)
+        try:
+            try:
+                conn.send({"type": "call", "call_id": call_id, "tool": tool, "args": args, "grants": grant_paths})
+            except Exception as exc:
+                raise ValueError(f"Runner {conn.hostname} is unreachable: {exc}") from None
+            try:
+                return fut.result(timeout=timeout)
+            except FutureTimeout:
+                raise TimeoutError(f"Runner {conn.hostname} did not answer {tool} within {timeout:g}s") from None
+        finally:
+            with self.lock:
+                self.pending.pop(call_id, None)
+
+
+RUNNERS = RunnerRegistry()
+
+
+def runner_timeout():
+    return float(config().get("tools", {}).get("runner_timeout_seconds", 60))
+
+
+class RunnerExecutor:
+    """Forwards each tool call to the `jarvis runner` on the machine the grant lives on.
+
+    The server only matches paths lexically (it cannot see the runner's filesystem);
+    the runner resolves symlinks and enforces the grants plus its own local allow list,
+    so a compromised server still cannot escape them. Approvals stay on the server."""
+
+    location = "runner"
+
+    def execute(self, cid, name, args):
+        if name not in tools.NAMES:
+            raise ValueError("Unknown tool")
+        target = (args or {}).get("cwd" if name == "run_command" else "path")
+        if not isinstance(target, str) or not posixpath.isabs(target):
+            raise ValueError("Use an absolute path")
+        target = posixpath.normpath(target)
+        rows = grants(cid)
+        inside = [g for g in rows if target == g["path"] or target.startswith(g["path"].rstrip("/") + "/")]
+        if not inside:
+            raise ValueError("Path is outside granted folders")
+        owned = [g for g in inside if g["runner_id"]]
+        if not owned:
+            raise ValueError("This item was attached before the runner was set up; attach it again")
+        runner_id = max(owned, key=lambda g: len(g["path"]))["runner_id"]
+        paths = [g["path"] for g in rows if g["runner_id"] == runner_id]
+        return RUNNERS.call(runner_id, name, args, paths, runner_timeout())
+
+
+EXECUTORS = {"server": ServerExecutor, "runner": RunnerExecutor}
 
 
 def executor():
@@ -432,17 +529,13 @@ def workspace_instructions(cid):
     each attached folder so every backend model sees the same project rules."""
     budget = int(config()["agent"].get("instructions_max_chars", 12000))
     sections, seen = [], set()
+    ex = executor()
     for root in folders(cid):
-        base = Path(root)
-        if not base.is_dir():
-            continue
         for name in INSTRUCTION_FILES:
-            f = base / name
-            try:
-                if not f.is_file() or f.stat().st_size > 200_000:
-                    continue
-                text = f.read_text(errors="replace").strip()
-            except OSError:
+            f = posixpath.join(root, name)
+            try:  # through the executor, so a runner's files are read on the runner
+                text = ex.execute(cid, "read_file", {"path": f}).strip()
+            except Exception:
                 continue
             # CLAUDE.md commonly just imports AGENTS.md ("@AGENTS.md"); drop import lines.
             text = re.sub(r"<!--.*?-->", "", text, flags=re.S)

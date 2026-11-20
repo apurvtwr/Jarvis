@@ -23,9 +23,10 @@ machine.
 | Core: config, SQLite, projects/chats, tools, agent loop | `local_agent/core.py` | venv |
 | LLM backends | `local_agent/adapters.py` | venv |
 | CLI (`jarvis …`, Typer) — HTTP client only, except `serve` | `local_agent/cli.py`, `local_agent/client.py` | venv |
+| Runner (`jarvis runner`): runs agent tools on the user's machine for a remote server | `local_agent/runner.py`, `local_agent/tools.py` | venv, user unit `jarvis-runner.service`; never import `core` there |
 | Native desktop app (GTK4 + libadwaita + WebKitGTK 6.0) | `local_agent/desktop.py` | **system** `/usr/bin/python3` with `python3-gi`; stdlib + `gi` only, never import the package or venv deps there |
 | Web UI loaded by the desktop app | `web/index.html`, `web/theme.css`, `web/icons.js`, `web/app.js` | plain JS, no build step, no frameworks |
-| Packaging | `packaging/` (`dev.jarvis.Jarvis.desktop.in`, `jarvis.service.in`, icons), `Makefile`, `scripts/` | |
+| Packaging | `packaging/` (`dev.jarvis.Jarvis.desktop.in`, `jarvis.service.in`, `jarvis-runner.service.in`, icons), `Makefile`, `scripts/` | |
 
 Server data: `~/.local/share/jarvis/agent.sqlite3`. Server config: `~/.config/jarvis/config.yaml`
 (see `config.example.yaml`). Server secrets: `~/.config/jarvis/env` (service `EnvironmentFile`).
@@ -52,14 +53,19 @@ No UI frameworks, component libraries or light theme. The GTK window chrome in
 * **Client/server** — clients use only the HTTP API; `GET /api/info` reports auth and
   where tools run. Turns are async: `POST …/messages` → 202, poll `GET /chats/{id}`
   until `conversation.run_status` ≠ `running`. Auth: bearer token when configured.
-* **Tool executors** — `core.EXECUTORS` (`server` today; `runner` planned). Tools must
-  go through `core.executor()`, never call `tool_execute` directly from new code.
+* **Tool executors** — `core.EXECUTORS`: `server` (tools run on the backend host) and
+  `runner` (`RunnerExecutor` forwards calls over the runner WebSocket to `jarvis runner`
+  on the user's machine; registry `core.RUNNERS`). Tools must go through
+  `core.executor()`, never call `tool_execute` directly from new code. Tool code lives
+  in `tools.py`, shared by both. The runner re-checks every path locally (grants +
+  `runner.allow`/`runner.deny`); never move that check to the server only.
 * **Agent loop** — `core.run_agent`. `list_files`/`read_file` run freely inside
   granted paths; `write_file`/`run_command` pause for user approval and resume
   via `core.approve`, threading `tool_call_id`s.
 * **Grants** — folders *or files* attached to a chat (`folders` table) or a
-  project (`project_folders`). `core.allowed_path` enforces them after resolving
-  symlinks. Never widen this.
+  project (`project_folders`), with a `runner_id` (NULL = server-side path).
+  `core.allowed_path` (server) and `Runner.check` (runner) enforce them after
+  resolving symlinks. Never widen this.
 * **Projects** — chats in a project share its instructions, grants and recent
   sibling turns (`core.project_context`). Chats can be renamed, moved, deleted.
 * **Workspace instructions** — `core.workspace_instructions` loads `AGENTS.md`

@@ -354,25 +354,39 @@ function grantTarget() {
   return { p, endpoint: p ? '/projects/' + p.id + '/folders' : '/chats/' + current + '/folders' };
 }
 
+/* With tools.executor "runner", grants name the machine the path is on: this one when
+   its runner is connected (matched by hostname), otherwise the server picks the only runner. */
+function localRunner() {
+  const host = window.jarvisDesktop?.hostname;
+  return (serverInfo?.tools.runners || []).find(r => host && r.hostname === host) || null;
+}
+const grantBody = path => (localRunner() ? { path, runner_id: localRunner().id } : { path });
+
 async function attachPaths(paths) {
   const { endpoint } = grantTarget(); const failed = [];
-  for (const path of paths) { try { await api(endpoint, 'POST', { path }); } catch (e) { failed.push(path + ': ' + e.message); } }
+  for (const path of paths) { try { await api(endpoint, 'POST', grantBody(path)); } catch (e) { failed.push(path + ': ' + e.message); } }
   await refreshDetail(true);
   if (failed.length) showError('Some items could not be attached', failed.join('\n'));
 }
 
-/* Browsing only makes sense when tools run on the machine the picker shows. With a
-   remote server the paths must exist on the server (or, later, on a connected runner). */
+/* Browsing only makes sense when tools run on the machine the picker shows: the server's
+   host (executor "server"), or this computer when its runner is connected (executor "runner"). */
 function canBrowse() {
   if (!serverInfo) return true;
+  if (serverInfo.tools.executor === 'runner') return !!(window.jarvisDesktop?.native && localRunner());
   if (serverInfo.tools.executor !== 'server') return false;
   if (window.jarvisDesktop?.native) return window.jarvisDesktop.hostname === serverInfo.tools.host;
   return true;  // browser: the server allows its picker only for same-machine clients
 }
 
-function grantFolder() {
+async function grantFolder() {
   if (!current) return showError('No conversation selected', 'Create a chat first, then attach files or folders.');
-  if (!canBrowse()) return typePath(`Jarvis runs its tools on ${serverInfo.tools.host}, not this computer, so the path must exist there`);
+  try { serverInfo = await api('/info'); } catch (e) { }
+  if (!canBrowse()) {
+    if (serverInfo.tools.executor === 'runner' && !serverInfo.tools.host)
+      return typePath('No single runner is connected for this computer; start jarvis runner here (or enable jarvis-runner.service), or type a path on the runner’s machine');
+    return typePath(`Jarvis runs its tools on ${serverInfo.tools.host}, not this computer, so the path must exist there`);
+  }
   const { p } = grantTarget();
   const list = el('div', 'choice-list');
   const choice = (iconName, label, hint, onPick) => {
@@ -399,7 +413,7 @@ function typePath(reason = '') {
   openDialog({ eyebrow: 'JARVIS / WORKSPACE', eyebrowIcon: 'attach', heading: 'Attach by path',
     description: (reason ? reason + '. ' : '') + 'Enter the absolute path of a file or folder.',
     field: { label: 'ABSOLUTE PATH', placeholder: '/home/you/projects/robot' }, submit: { icon: 'attach', label: 'Attach' },
-    onSubmit: async path => { await api(grantTarget().endpoint, 'POST', { path }); await refreshDetail(true); } });
+    onSubmit: async path => { await api(grantTarget().endpoint, 'POST', grantBody(path)); await refreshDetail(true); } });
 }
 
 async function send() {

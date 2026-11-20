@@ -30,10 +30,17 @@ def fail(exc):
     raise typer.Exit(code=1)
 
 
-def grant_path(client, path):
-    # A local server shares this machine's filesystem, so send an absolute path.
-    # A remote server resolves paths on its own host (see docs/ARCHITECTURE.md).
-    return str(Path(path).expanduser().resolve()) if client.local else str(path)
+def grant_body(client, path):
+    """Grant payload. Paths are absolute on the machine where tools run: this one when the
+    server is local or this machine's runner is connected; otherwise the server's host."""
+    import socket
+    info = client.get("/info")["tools"]
+    if info["executor"] == "runner":
+        mine = [r for r in info.get("runners", []) if r["hostname"] == socket.gethostname()]
+        if mine:
+            return {"path": str(Path(path).expanduser().resolve()), "runner_id": mine[0]["id"]}
+        return {"path": str(path)}
+    return {"path": str(Path(path).expanduser().resolve()) if client.local else str(path)}
 
 
 @app.command()
@@ -111,7 +118,37 @@ def status():
         fail(exc)
     console.print(f"Server: {client.url} ({'local' if client.local else 'remote'})")
     console.print(f"Auth: {'token' if info['auth_required'] else 'none (local only)'}")
-    console.print(f"Tools run on: {info['tools']['executor']} ({info['tools']['host']})")
+    tools = info["tools"]
+    console.print(f"Tools run on: {tools['executor']} ({tools['host'] or 'no single runner connected'})")
+    if tools["executor"] == "runner":
+        for r in tools.get("runners", []):
+            console.print(f"  runner {r['hostname']} ({r['id'][:8]})")
+        if not tools.get("runners"):
+            console.print("  no runner connected: run `jarvis runner` (or enable jarvis-runner.service)")
+
+
+@app.command()
+def runner():
+    """Run agent tools on this computer for the configured (remote) server.
+
+    Opens an outbound WebSocket to the server and executes tool calls locally inside
+    the chat's grants and this machine's runner.allow roots. See docs/ARCHITECTURE.md."""
+    from .client import runner_settings
+    from .runner import DEFAULT_DENY, AuthError, Runner, run_forever
+    settings = runner_settings()
+    worker = Runner(allow=settings["allow"], deny=DEFAULT_DENY if settings["deny"] is None else settings["deny"],
+                    allow_commands=bool(settings["allow_commands"]), limits=settings["limits"])
+    console.print(f"Jarvis runner for {settings['url']}; exposing {', '.join(map(str, worker.allow))}"
+                  + ("" if worker.allow_commands else " (commands disabled)"))
+    try:
+        run_forever(settings["url"], settings["token"], worker, log=lambda m: console.print(m, highlight=False))
+    except AuthError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(code=2)  # jarvis-runner.service does not restart on this
+    except ValueError as exc:
+        fail(exc)
+    except KeyboardInterrupt:
+        raise typer.Exit()
 
 
 @app.command()
@@ -121,7 +158,7 @@ def new(title: str = "New chat", folder: list[Path] = typer.Option(None, "--fold
     try:
         cid = client.post("/chats", {"title": title, "model": None if model == "auto" else model})["id"]
         for path in folder or []:
-            client.post(f"/chats/{cid}/folders", {"path": grant_path(client, path)})
+            client.post(f"/chats/{cid}/folders", grant_body(client, path))
     except ApiError as exc:
         fail(exc)
     console.print(cid)
@@ -147,7 +184,7 @@ def grant(chat_id: str, folder: Path):
     """Grant an existing conversation access to a file or folder."""
     client = api()
     try:
-        console.print(client.post(f"/chats/{chat_id}/folders", {"path": grant_path(client, folder)})["path"])
+        console.print(client.post(f"/chats/{chat_id}/folders", grant_body(client, folder))["path"])
     except ApiError as exc:
         fail(exc)
 

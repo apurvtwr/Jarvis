@@ -2,16 +2,18 @@
 
 Designed to run either on the user's machine (default, 127.0.0.1) or on a remote
 host behind TLS. See docs/ARCHITECTURE.md."""
+import asyncio
 import hmac
 import ipaddress
 import json
 import os
+import re
 import socket
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -37,6 +39,7 @@ class ChatRequest(BaseModel):
     model: str = "auto"
 class FolderRequest(BaseModel):
     path: str
+    runner_id: str | None = None   # with tools.executor: runner, the machine the path is on
 class PickRequest(BaseModel):
     kind: str = "folder"
     multiple: bool = True
@@ -62,6 +65,18 @@ class ProjectUpdate(BaseModel):
 
 def auth_token():
     return os.environ.get("JARVIS_AUTH_TOKEN") or core.config()["server"].get("auth_token") or None
+
+
+def runner_token():
+    """Runners may use their own token (narrower than the API token); either is accepted."""
+    return os.environ.get("JARVIS_RUNNER_TOKEN") or core.config()["server"].get("runner_token") or None
+
+
+def runner_authorized(header, client_host):
+    tokens = [t for t in (runner_token(), auth_token()) if t]
+    if not tokens:
+        return is_loopback(client_host)  # no tokens configured: the server is loopback-only anyway
+    return any(hmac.compare_digest(header.encode(), f"Bearer {t}".encode()) for t in tokens)
 
 
 def is_loopback(host):
@@ -134,7 +149,7 @@ def detail(cid: str):
 
 @app.post("/api/chats/{cid}/folders")
 def folder(cid: str, req: FolderRequest):
-    return {"path": call(core.add_folder, cid, req.path)}
+    return {"path": call(core.add_folder, cid, req.path, req.runner_id)}
 
 def start_turn(cid, fn, *args):
     """Turns can take minutes (LLM + tools). Run them in the background and return
@@ -174,7 +189,7 @@ def select_model(cid: str, req: ModelRequest):
     return {"model": call(core.set_conversation_model, cid, req.model)}
 
 FEATURES = ["projects", "project-folders", "chat-renaming", "chat-delete", "project-delete", "providers",
-            "themed-dialogs", "file-picker", "file-grants", "auth", "async-turns"]
+            "themed-dialogs", "file-picker", "file-grants", "auth", "async-turns", "runners"]
 
 
 @app.get("/api/version")
@@ -186,8 +201,63 @@ def version():
 def info():
     """Public capability document clients read before doing anything location-dependent."""
     ex = core.executor()
+    runners = core.RUNNERS.list()
+    if ex.location == "runner":  # tools run on the runner's machine, if exactly one is connected
+        host = runners[0]["hostname"] if len(runners) == 1 else None
+    else:
+        host = socket.gethostname()
     return {"app": "jarvis", "api": API_VERSION, "auth_required": bool(auth_token()),
-            "tools": {"executor": ex.location, "host": socket.gethostname()}}
+            "tools": {"executor": ex.location, "host": host,
+                      "runners": [{"id": r["id"], "hostname": r["hostname"]} for r in runners]}}
+
+
+@app.get("/api/runners")
+def runners():
+    return core.RUNNERS.list()
+
+
+RUNNER_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+@app.websocket("/api/runners/connect")
+async def runner_connect(ws: WebSocket):
+    """Outbound connection from `jarvis runner` on the user's machine. Protocol (JSON):
+    runner → {"type": "hello", "runner_id", "hostname"}; server → {"type": "welcome"};
+    server → {"type": "call", "call_id", "tool", "args", "grants"};
+    runner → {"type": "result", "call_id", "ok", "result" | "error"}."""
+    await ws.accept()
+    if not runner_authorized(ws.headers.get("authorization", ""), ws.client.host if ws.client else ""):
+        await ws.close(code=4401, reason="Authentication required")
+        return
+    try:
+        hello = await asyncio.wait_for(ws.receive_json(), timeout=15)
+    except (asyncio.TimeoutError, WebSocketDisconnect, ValueError):
+        await ws.close(code=4400, reason="Expected hello")
+        return
+    rid, hostname = hello.get("runner_id"), hello.get("hostname")
+    if hello.get("type") != "hello" or not isinstance(rid, str) or not RUNNER_ID.match(rid) \
+            or not isinstance(hostname, str) or not 0 < len(hostname) <= 255:
+        await ws.close(code=4400, reason="Invalid hello")
+        return
+    loop = asyncio.get_running_loop()
+
+    def send(msg):  # called from agent worker threads
+        asyncio.run_coroutine_threadsafe(ws.send_json(msg), loop).result(timeout=15)
+
+    def close():
+        asyncio.run_coroutine_threadsafe(ws.close(code=4409, reason="Replaced by a newer connection"), loop)
+
+    conn = core.RUNNERS.register(rid, hostname, send, close)
+    try:
+        await ws.send_json({"type": "welcome", "api": API_VERSION})
+        while True:
+            msg = await ws.receive_json()
+            if isinstance(msg, dict) and msg.get("type") == "result":
+                core.RUNNERS.deliver(conn, msg)
+    except (WebSocketDisconnect, ValueError, RuntimeError):
+        pass
+    finally:
+        core.RUNNERS.unregister(conn)
 
 @app.get("/api/projects")
 def list_projects():
@@ -204,7 +274,7 @@ def edit_project(pid: str, req: ProjectUpdate):
 
 @app.post("/api/projects/{pid}/folders")
 def project_folder(pid: str, req: FolderRequest):
-    return {"path": call(core.add_project_folder, pid, req.path)}
+    return {"path": call(core.add_project_folder, pid, req.path, req.runner_id)}
 
 @app.patch("/api/chats/{cid}")
 def rename_chat(cid: str, req: RenameRequest):

@@ -10,8 +10,8 @@ server shares its machine, filesystem, display or process manager.
  │ Browser                                 │ ───────► │  auth · chats · projects · run state     │
  │ CLI (cli.py → client.py)                │  Bearer  │ Core     (core.py)                       │
  │                                         │  token   │  agent loop · routing · SQLite           │
- │ [future] Runner: executes tools on      │ ◄─────── │ Adapters (adapters.py) → Ollama/OpenAI/  │
- │          this machine's files           │  (WSS)   │                          Anthropic       │
+ │ Runner (jarvis runner → runner.py):     │ ◄─────── │ Adapters (adapters.py) → Ollama/OpenAI/  │
+ │   executes tools on this machine's files│  (WSS)   │                          Anthropic       │
  └─────────────────────────────────────────┘          └──────────────────────────────────────────┘
 ```
 
@@ -38,8 +38,8 @@ server shares its machine, filesystem, display or process manager.
    Runs interrupted by a server restart are marked `error` on startup. This keeps
    minutes-long LLM/tool turns working behind proxies with 60–100 s request timeouts.
 6. **Capabilities are discovered, not assumed.** `GET /api/info` (public) returns
-   `auth_required` and `tools: {executor, host}`. Clients decide from it whether a
-   local file picker makes sense.
+   `auth_required` and `tools: {executor, host, runners: [{id, hostname}]}`. Clients
+   decide from it whether a local file picker makes sense.
 
 ## Where tools run (the important cloud question)
 
@@ -49,24 +49,60 @@ Agent tools (`list_files`, `read_file`, `write_file`, `run_command`) touch files
 | executor | status | runs tools on | right when |
 |---|---|---|---|
 | `server` | implemented (`ServerExecutor`) | the machine running the backend | the backend runs on the user's computer, or the user wants a cloud workspace |
-| `runner` | **design only** | the user's computer, via a small runner process | the backend runs in the cloud but files stay local |
+| `runner` | implemented (`RunnerExecutor` + `jarvis runner`) | the user's computer, via a small runner process | the backend runs in the cloud but files stay local |
 
 Grants (`folders`, `project_folders`) are paths **on the machine where the executor
-runs**. The desktop app compares `/api/info` `tools.host` to its own hostname: native
-browsing is offered only when they match; otherwise the user types a path that exists
-on that host.
+runs**. With `server`, the desktop app compares `/api/info` `tools.host` to its own
+hostname: native browsing is offered only when they match. With `runner`, browsing is
+offered when a runner with this computer's hostname is connected, and the grant is sent
+with that `runner_id`. Otherwise the user types a path that exists on that host.
 
-### Planned runner design
+Tool implementations live in `local_agent/tools.py` (no DB, no server imports), shared
+by `ServerExecutor` and the runner.
 
-* `jarvis runner` runs on the user's computer, opens an **outbound** WebSocket to
-  `wss://server/api/runners/connect` (works through NAT/firewalls; nothing listens
-  locally), authenticated with its own runner token, and registers a stable
-  `runner_id` and hostname.
-* Grants gain a `runner_id`. `RunnerExecutor.execute` sends
-  `{call_id, tool, args}` to that runner and awaits the result (timeout →
-  tool error). The runner enforces the same `allowed_path` checks locally, so a
-  compromised server still cannot escape the user's grants.
-* Approvals stay on the server's run state; the runner never decides on its own.
+### Runner (`tools.executor: runner`)
+
+* **Connection.** `jarvis runner` (`cli.py` → `runner.py`) opens an **outbound**
+  WebSocket to `wss://server/api/runners/connect` (works through NAT/firewalls; nothing
+  listens locally). It sends `Authorization: Bearer <runner token>`; the server accepts
+  `JARVIS_RUNNER_TOKEN` / `server.runner_token` (a narrower secret: it can only connect
+  a runner) or the API token. With no token configured at all, only loopback runners are
+  accepted. Plain `ws://` is refused unless the server URL is loopback. A rejected token
+  closes with code 4401 and the runner exits with status 2 (the unit does not restart).
+  Other failures reconnect with backoff (1 s → 60 s).
+* **Identity.** A stable `runner_id` (`~/.config/jarvis/runner-id`, created on first
+  run) plus the hostname, sent in `hello`. A reconnect with the same id replaces the
+  old socket. The registry (`core.RUNNERS`) is in memory; runners re-register after a
+  server restart.
+* **Protocol** (JSON text frames): runner `{"type":"hello","runner_id","hostname"}` →
+  server `{"type":"welcome"}`; server `{"type":"call","call_id","tool","args","grants"}` →
+  runner `{"type":"result","call_id","ok","result"|"error"}`. `tool` is one of the agent
+  tools or `resolve` (validate a path before it is stored as a grant). Calls run
+  concurrently on the runner (thread pool). Only the connection a call was sent to may
+  answer it.
+* **Grants.** `folders` / `project_folders` have a `runner_id` column (NULL = server
+  grant). With `executor: runner`, attaching a path asks the runner to `resolve` it
+  (body `runner_id`, or the only connected runner) and stores the resolved path with
+  that runner. Grants made before switching to the runner must be attached again.
+* **Routing.** `RunnerExecutor.execute` requires an absolute path, matches it lexically
+  against the chat's grants (the server cannot see the runner's filesystem), picks the
+  runner of the longest matching grant, and sends that runner's grant paths with the call.
+  Workspace instructions (`AGENTS.md`/`CLAUDE.md`) are read through the executor too.
+* **Local enforcement (do not trust the server).** The runner resolves every path
+  (symlinks followed, same as `core.allowed_path`) and requires it to be inside the
+  grants sent with the call **and** inside its own `runner.allow` roots (client.yaml,
+  default `~`) **and** outside `runner.deny` (default: `~/.ssh`, `~/.gnupg`,
+  `~/.config/jarvis`, keyrings, cloud credentials). A compromised server can lie about
+  grants but cannot leave `allow`/`deny`. `run_command` is code execution inside an
+  allowed folder; set `runner.allow_commands: false` to disable it locally, and narrow
+  `runner.allow` to specific project folders for the strongest boundary.
+* **Timeouts.** Each call waits `tools.runner_timeout_seconds` (default 60; keep it above
+  `command_timeout_seconds`). Timeout, disconnect or a missing runner becomes a
+  `Tool error: …` the model sees; the turn continues.
+* **Approvals** stay on the server's run state; the runner never decides on its own.
+* **Service.** `make install` installs `jarvis-runner.service` (user unit, not enabled):
+  `systemctl --user enable --now jarvis-runner.service`. It reads client.yaml and
+  optionally `~/.config/jarvis/runner.env`.
 * The desktop app may host the runner in-process later, so a single launch does both.
 
 ## Deployment checklist (cloud)
@@ -76,7 +112,8 @@ on that host.
 - Configure providers on the server (API keys via env). Ollama must be reachable
   from the server (`base_url`), not from the client.
 - On each client: `client.yaml` with `url: https://…` and the token (`chmod 600`).
-- Choose `tools.executor`: `server` for a cloud workspace; `runner` once implemented
-  for local files.
+- Choose `tools.executor`: `server` for a cloud workspace; `runner` for local files
+  (set `JARVIS_RUNNER_TOKEN` on the server, `runner_token` + `runner.allow` in each
+  client's client.yaml, then enable `jarvis-runner.service` there).
 - SQLite is fine for one user; multi-user would need per-user scoping and a
   server database — out of scope until needed.

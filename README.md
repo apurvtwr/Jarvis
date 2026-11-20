@@ -162,8 +162,11 @@ token_env: JARVIS_TOKEN
 
 On the server, set `JARVIS_AUTH_TOKEN`, put a TLS reverse proxy in front, and set
 `server.host`. `jarvis serve` refuses non-local binds without a token. `jarvis status`
-shows which server the CLI is talking to. Agent tools run on the server's machine today;
-a local "runner" for cloud setups is designed in `docs/ARCHITECTURE.md`.
+shows which server the CLI is talking to. Agent tools run on the server's machine by
+default. To keep files on your computer with a cloud server, set `tools.executor: runner`
+and `JARVIS_RUNNER_TOKEN` on the server, add `runner_token` and `runner.allow` to
+`client.yaml` (see `packaging/client.example.yaml`), and run `jarvis runner` (or
+`systemctl --user enable --now jarvis-runner.service`). Details in `docs/ARCHITECTURE.md`.
 
 ### Instructions for AI models
 
