@@ -1,15 +1,21 @@
 /* JARVIS desktop client. Styling: web/theme.css. Icons: web/icons.js. Theme rules: docs/THEME.md */
 let current = null, pending = null, busy = false, activeRequest = null, displayName = 'You';
-let projects = [], chats = [], lastSignature = '', polling = false, dragging = null;
+let projects = [], chats = [], lastSignature = '', polling = false, dragging = null, serverInfo = null, askingToken = false;
 const $ = id => document.getElementById(id);
 
 /* ---------- utilities ---------- */
+/* The server may be local or remote. The desktop app injects the bearer token;
+   in a browser it is entered once and kept in this browser's storage. */
+const authToken = () => window.jarvisDesktop?.token || store('jarvis-token') || '';
 async function api(path, method = 'GET', data) {
   let r;
-  try { r = await fetch('/api' + path, { method, headers: { 'Content-Type': 'application/json' }, body: data === undefined ? undefined : JSON.stringify(data) }); }
-  catch (e) { throw Error('Cannot reach the Jarvis service. Check that it is running and try again.'); }
+  const headers = { 'Content-Type': 'application/json' };
+  if (authToken()) headers.Authorization = 'Bearer ' + authToken();
+  try { r = await fetch('/api' + path, { method, headers, body: data === undefined ? undefined : JSON.stringify(data) }); }
+  catch (e) { throw Error('Cannot reach the Jarvis server. Check your connection and that the server is running.'); }
   const raw = await r.text(); let obj;
   try { obj = raw ? JSON.parse(raw) : {}; } catch { obj = {}; }
+  if (r.status === 401) { askForToken(); throw Error('This Jarvis server requires an access token.'); }
   if (!r.ok) {
     if (r.status === 404 && obj.detail === 'Not Found') throw Error('The running Jarvis service is out of date. Install this update and restart the service, then try again.');
     const detail = typeof obj.detail === 'string' ? obj.detail : Array.isArray(obj.detail) ? 'Please check the supplied information.' : null;
@@ -30,6 +36,22 @@ async function withCurrent(fn) {
   if (!current) return showError('No conversation selected', 'Create or select a chat first.');
   const c = chatById(current) || (await api('/chats/' + current)).conversation;
   fn(c);
+}
+
+function askForToken() {
+  if (askingToken || window.jarvisDesktop?.token) {
+    if (window.jarvisDesktop?.native && !askingToken) { askingToken = true; showError('Access token rejected', 'Set the token in ~/.config/jarvis/client.yaml (token: …) or JARVIS_TOKEN, then restart Jarvis.'); }
+    return;
+  }
+  askingToken = true;
+  openDialog({ eyebrow: 'JARVIS / ACCESS', eyebrowIcon: 'shield', heading: 'Sign in to this Jarvis server',
+    description: 'Enter the access token configured on the server (JARVIS_AUTH_TOKEN). It is stored only in this browser.',
+    field: { label: 'ACCESS TOKEN' }, submit: { icon: 'check', label: 'Connect' },
+    onSubmit: async token => {
+      const r = await fetch('/api/chats', { headers: { Authorization: 'Bearer ' + token } });
+      if (r.status === 401) throw Error('That token was rejected.');
+      store('jarvis-token', token); location.reload();
+    } });
 }
 
 /* ---------- tooltip ---------- */
@@ -256,7 +278,7 @@ function messageBox(role, content, model) {
   box.append(meta, el('div', '', content)); return box;
 }
 function showThinking() {
-  if (!activeRequest || activeRequest.id !== current || $('thinking')) return;
+  if ($('thinking')) return;
   const box = el('article', 'message assistant'); box.id = 'thinking'; box.append(el('div', 'meta', 'JARVIS'));
   const content = el('div', 'thinking'); content.append(atomNode(), el('span', '', 'Processing your request…')); box.append(content);
   $('messages').append(box);
@@ -265,6 +287,7 @@ const atBottom = node => node.scrollHeight - node.scrollTop - node.clientHeight 
 async function refreshDetail(force = false) {
   if (!current) return;
   const id = current, d = await api('/chats/' + id); if (current !== id) return;
+  const running = d.conversation.run_status === 'running';
   const sig = JSON.stringify([d.messages, d.pending?.id, d.conversation, d.folders]);
   const pane = $('messages'); const stick = force || atBottom(pane); const oldTop = pane.scrollTop;
   if (force || sig !== lastSignature) {
@@ -272,7 +295,7 @@ async function refreshDetail(force = false) {
     if (!d.messages.length && !(activeRequest?.id === id)) pane.append(emptyState('Ask a question, inspect a project, or assign a task.'));
     for (const m of d.messages) pane.append(messageBox(m.role, m.content, m.model));
     if (activeRequest?.id === id && activeRequest.message && !d.messages.some(m => m.role === 'user' && m.content === activeRequest.message)) pane.append(messageBox('user', activeRequest.message));
-    if (busy && activeRequest?.id === id) showThinking();
+    if (running || (busy && activeRequest?.id === id)) showThinking();
     pane.scrollTop = stick ? pane.scrollHeight : oldTop;
   }
   const known = chatById(id);
@@ -280,7 +303,24 @@ async function refreshDetail(force = false) {
   $('model').value = d.conversation.model_override || 'auto';
   const f = $('folders'); f.replaceChildren();
   if (d.folders.length) { f.append(icon('folder-open', 14), document.createTextNode(d.folders.join('  ·  '))); }
-  pending = d.pending; showApproval();
+  pending = running ? null : d.pending; showApproval();
+  $('send').disabled = running;
+  return d;
+}
+
+/* Turns run in the background on the server (they can outlast proxy timeouts).
+   Poll the chat until it is no longer running, then surface any error. */
+async function waitForTurn(id) {
+  for (;;) {
+    await new Promise(r => setTimeout(r, 1000));
+    if (current !== id) return;  // user switched chats; background polling takes over
+    const d = await refreshDetail(false);
+    if (!d || d.conversation.run_status !== 'running') {
+      if (d?.conversation.run_status === 'error') showError('Jarvis could not finish', d.conversation.run_error || 'The request failed.');
+      $('status').textContent = d?.pending ? 'Waiting for approval' : '';
+      return;
+    }
+  }
 }
 
 async function loadConfig() {
@@ -314,15 +354,39 @@ function grantTarget() {
   return { p, endpoint: p ? '/projects/' + p.id + '/folders' : '/chats/' + current + '/folders' };
 }
 
+/* With tools.executor "runner", grants name the machine the path is on: this one when
+   its runner is connected (matched by hostname), otherwise the server picks the only runner. */
+function localRunner() {
+  const host = window.jarvisDesktop?.hostname;
+  return (serverInfo?.tools.runners || []).find(r => host && r.hostname === host) || null;
+}
+const grantBody = path => (localRunner() ? { path, runner_id: localRunner().id } : { path });
+
 async function attachPaths(paths) {
   const { endpoint } = grantTarget(); const failed = [];
-  for (const path of paths) { try { await api(endpoint, 'POST', { path }); } catch (e) { failed.push(path + ': ' + e.message); } }
+  for (const path of paths) { try { await api(endpoint, 'POST', grantBody(path)); } catch (e) { failed.push(path + ': ' + e.message); } }
   await refreshDetail(true);
   if (failed.length) showError('Some items could not be attached', failed.join('\n'));
 }
 
-function grantFolder() {
+/* Browsing only makes sense when tools run on the machine the picker shows: the server's
+   host (executor "server"), or this computer when its runner is connected (executor "runner"). */
+function canBrowse() {
+  if (!serverInfo) return true;
+  if (serverInfo.tools.executor === 'runner') return !!(window.jarvisDesktop?.native && localRunner());
+  if (serverInfo.tools.executor !== 'server') return false;
+  if (window.jarvisDesktop?.native) return window.jarvisDesktop.hostname === serverInfo.tools.host;
+  return true;  // browser: the server allows its picker only for same-machine clients
+}
+
+async function grantFolder() {
   if (!current) return showError('No conversation selected', 'Create a chat first, then attach files or folders.');
+  try { serverInfo = await api('/info'); } catch (e) { }
+  if (!canBrowse()) {
+    if (serverInfo.tools.executor === 'runner' && !serverInfo.tools.host)
+      return typePath('No single runner is connected for this computer; start jarvis runner here (or enable jarvis-runner.service), or type a path on the runner’s machine');
+    return typePath(`Jarvis runs its tools on ${serverInfo.tools.host}, not this computer, so the path must exist there`);
+  }
   const { p } = grantTarget();
   const list = el('div', 'choice-list');
   const choice = (iconName, label, hint, onPick) => {
@@ -349,7 +413,7 @@ function typePath(reason = '') {
   openDialog({ eyebrow: 'JARVIS / WORKSPACE', eyebrowIcon: 'attach', heading: 'Attach by path',
     description: (reason ? reason + '. ' : '') + 'Enter the absolute path of a file or folder.',
     field: { label: 'ABSOLUTE PATH', placeholder: '/home/you/projects/robot' }, submit: { icon: 'attach', label: 'Attach' },
-    onSubmit: async path => { await api(grantTarget().endpoint, 'POST', { path }); await refreshDetail(true); } });
+    onSubmit: async path => { await api(grantTarget().endpoint, 'POST', grantBody(path)); await refreshDetail(true); } });
 }
 
 async function send() {
@@ -360,7 +424,7 @@ async function send() {
   $('prompt').value = ''; $('status').textContent = 'Jarvis is processing…';
   const pane = $('messages'); pane.querySelector('.empty-state')?.remove();
   pane.append(messageBox('user', message)); showThinking(); pane.scrollTop = pane.scrollHeight;
-  try { const r = await api('/chats/' + id + '/messages', 'POST', { message, model: $('model').value }); if (id === current) $('status').textContent = r.status === 'approval' ? 'Waiting for approval' : ''; }
+  try { await api('/chats/' + id + '/messages', 'POST', { message, model: $('model').value }); await waitForTurn(id); }
   catch (e) { showError('Request unsuccessful', e.message); $('status').textContent = ''; }
   finally { busy = false; activeRequest = null; $('send').disabled = false; if (id === current) await refreshDetail(true); }
 }
@@ -368,7 +432,7 @@ async function resolveApproval(accept) {
   if (!pending || busy) return;
   const id = current, aid = pending.id; busy = true; activeRequest = { id, message: null }; pending = null; showApproval();
   $('status').textContent = accept ? 'Executing approved operation…' : 'Continuing after denial…'; showThinking();
-  try { const r = await api('/chats/' + id + '/approvals/' + aid, 'POST', { accept }); if (id === current) $('status').textContent = r.status === 'approval' ? 'Waiting for approval' : ''; }
+  try { await api('/chats/' + id + '/approvals/' + aid, 'POST', { accept }); await waitForTurn(id); }
   catch (e) { showError('Request unsuccessful', e.message); }
   finally { busy = false; activeRequest = null; if (id === current) await refreshDetail(true); }
 }
@@ -376,6 +440,7 @@ $('prompt').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shift
 
 /* ---------- boot ---------- */
 hydrateIcons();
+api('/info').then(i => { serverInfo = i; }).catch(() => {});
 loadConfig().catch(e => { $('status').textContent = e.message; })
   .then(refreshChats)
   .then(async () => {
@@ -386,7 +451,7 @@ loadConfig().catch(e => { $('status').textContent = e.message; })
   .catch(e => { $('status').textContent = e.message; });
 let tick = 0;
 setInterval(async () => {
-  if (busy || polling || dragging || !$('dialog').hidden) return;
+  if (busy || polling || dragging || askingToken || !$('dialog').hidden) return;
   polling = true;
   try { if (++tick % 2 === 0) { await refreshChats(); if (current && !chatById(current)) { const next = chats[0]; next ? await openChat(next.id) : showEmpty(); } } if (current) await refreshDetail(false); } catch (e) { } finally { polling = false; }
 }, 4000);

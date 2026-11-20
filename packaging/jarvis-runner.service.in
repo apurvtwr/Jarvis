@@ -1,0 +1,17 @@
+[Unit]
+Description=Jarvis runner (executes agent tools on this computer for a remote Jarvis server)
+Documentation=file://@@DOCS@@
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+# Server URL, token and the local allow list come from ~/.config/jarvis/client.yaml.
+# Optional overrides (JARVIS_URL=..., JARVIS_RUNNER_TOKEN=...) go in this file:
+EnvironmentFile=-%h/.config/jarvis/runner.env
+ExecStart=@@EXEC@@ runner
+# Reconnects by itself on network errors; exits only when the token is rejected.
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=10
+[Install]
+WantedBy=default.target

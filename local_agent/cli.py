@@ -1,41 +1,76 @@
+"""Jarvis CLI. Every command except `serve` talks to the backend over HTTP
+(local or remote; see local_agent/client.py for how the target is chosen)."""
+import ipaddress
 import json
 import os
 import subprocess
-import sys
+import time
 import webbrowser
 from pathlib import Path
 
-import httpx
 import typer
 from rich.console import Console
 from rich.table import Table
-from . import core
 
-app = typer.Typer(help="Jarvis AI agent; conversations shared with desktop UI")
+from .client import ApiError, JarvisClient, client_settings, is_local_url
+
+app = typer.Typer(help="Jarvis AI agent. Talks to a local or remote Jarvis server.")
 console = Console()
-
-@app.command()
-def serve():
-    """Start local desktop backend."""
-    import uvicorn
-    cfg = core.config()["server"]
-    uvicorn.run("local_agent.server:app", host=cfg["host"], port=cfg["port"])
 
 SYSTEM_PYTHON = "/usr/bin/python3"
 DESKTOP_SHELL = Path(__file__).resolve().with_name("desktop.py")
 
 
+def api():
+    return JarvisClient()
+
+
+def fail(exc):
+    console.print(f"[red]Error: {exc}[/red]")
+    raise typer.Exit(code=1)
+
+
+def grant_body(client, path):
+    """Grant payload. Paths are absolute on the machine where tools run: this one when the
+    server is local or this machine's runner is connected; otherwise the server's host."""
+    import socket
+    info = client.get("/info")["tools"]
+    if info["executor"] == "runner":
+        mine = [r for r in info.get("runners", []) if r["hostname"] == socket.gethostname()]
+        if mine:
+            return {"path": str(Path(path).expanduser().resolve()), "runner_id": mine[0]["id"]}
+        return {"path": str(path)}
+    return {"path": str(Path(path).expanduser().resolve()) if client.local else str(path)}
+
+
+@app.command()
+def serve():
+    """Run the Jarvis server (what the jarvis.service user unit runs)."""
+    import uvicorn
+    from . import core
+    from .server import auth_token
+    cfg = core.config()["server"]
+    try:
+        loopback = cfg["host"] == "localhost" or ipaddress.ip_address(cfg["host"]).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback and not auth_token():
+        console.print("[red]Refusing to listen on a non-loopback address without an auth token.[/red]\n"
+                      "Set JARVIS_AUTH_TOKEN (or server.auth_token) and put Jarvis behind TLS. See docs/ARCHITECTURE.md.")
+        raise typer.Exit(code=2)
+    uvicorn.run("local_agent.server:app", host=cfg["host"], port=cfg["port"],
+                proxy_headers=not loopback, forwarded_allow_ips="*" if not loopback else None)
+
+
 def desktop_env():
     # The native shell uses the system PyGObject; keep ROS/venv paths out of it.
-    env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}}
-    return env
+    return {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}}
 
 
 @app.command()
 def desktop(browser: bool = typer.Option(False, "--browser", help="Open in a browser window instead of the native app")):
-    """Open the Jarvis desktop app (starts the backend service if needed)."""
-    cfg = core.config()["server"]
-    url = f"http://{cfg['host']}:{cfg['port']}"
+    """Open the Jarvis desktop app (starts the local backend service if needed)."""
+    url = client_settings()["url"]
     if not browser and Path(SYSTEM_PYTHON).exists():
         check = subprocess.run([SYSTEM_PYTHON, str(DESKTOP_SHELL), "--check"], env=desktop_env())
         if check.returncode == 0:
@@ -47,24 +82,22 @@ def desktop(browser: bool = typer.Option(False, "--browser", help="Open in a bro
 
 
 def open_browser_window(url):
-    import time
     from shutil import which
-    from urllib.request import urlopen
-    try:
-        with urlopen(url, timeout=1) as response:
-            if response.status >= 400:
-                raise RuntimeError(f"Backend returned {response.status}")
-    except Exception:
-        subprocess.run(["systemctl", "--user", "start", "jarvis.service"], check=False)
-        for _ in range(30):
-            try:
-                with urlopen(url, timeout=1):
+    if is_local_url(url):
+        client = JarvisClient(url=url)
+        try:
+            client.get("/version")
+        except ApiError:
+            subprocess.run(["systemctl", "--user", "start", "jarvis.service"], check=False)
+            for _ in range(30):
+                try:
+                    client.get("/version")
                     break
-            except Exception:
-                time.sleep(0.3)
-        else:
-            typer.echo("Jarvis backend is unavailable; inspect journalctl --user -u jarvis", err=True)
-            raise typer.Exit(code=1)
+                except ApiError:
+                    time.sleep(0.3)
+            else:
+                typer.echo("Jarvis backend is unavailable; inspect journalctl --user -u jarvis", err=True)
+                raise typer.Exit(code=1)
     for name in ("chromium", "google-chrome", "chromium-browser", "google-chrome-stable", "brave-browser"):
         if which(name):
             subprocess.Popen([name, f"--app={url}", "--class=jarvis-app", "--name=jarvis-app",
@@ -72,89 +105,205 @@ def open_browser_window(url):
             return
     webbrowser.open(url)
 
+
+@app.command()
+def status():
+    """Show which Jarvis server this CLI talks to and what it can do."""
+    client = api()
+    try:
+        info = client.get("/info")
+        client.get("/chats")  # verifies the token
+    except ApiError as exc:
+        console.print(f"Server: {client.url}")
+        fail(exc)
+    console.print(f"Server: {client.url} ({'local' if client.local else 'remote'})")
+    console.print(f"Auth: {'token' if info['auth_required'] else 'none (local only)'}")
+    tools = info["tools"]
+    console.print(f"Tools run on: {tools['executor']} ({tools['host'] or 'no single runner connected'})")
+    if tools["executor"] == "runner":
+        for r in tools.get("runners", []):
+            console.print(f"  runner {r['hostname']} ({r['id'][:8]})")
+        if not tools.get("runners"):
+            console.print("  no runner connected: run `jarvis runner` (or enable jarvis-runner.service)")
+
+
+@app.command()
+def runner():
+    """Run agent tools on this computer for the configured (remote) server.
+
+    Opens an outbound WebSocket to the server and executes tool calls locally inside
+    the chat's grants and this machine's runner.allow roots. See docs/ARCHITECTURE.md."""
+    from .client import runner_settings
+    from .runner import DEFAULT_DENY, AuthError, Runner, run_forever
+    settings = runner_settings()
+    worker = Runner(allow=settings["allow"], deny=DEFAULT_DENY if settings["deny"] is None else settings["deny"],
+                    allow_commands=bool(settings["allow_commands"]), limits=settings["limits"])
+    console.print(f"Jarvis runner for {settings['url']}; exposing {', '.join(map(str, worker.allow))}"
+                  + ("" if worker.allow_commands else " (commands disabled)"))
+    try:
+        run_forever(settings["url"], settings["token"], worker, log=lambda m: console.print(m, highlight=False))
+    except AuthError as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(code=2)  # jarvis-runner.service does not restart on this
+    except ValueError as exc:
+        fail(exc)
+    except KeyboardInterrupt:
+        raise typer.Exit()
+
+
 @app.command()
 def new(title: str = "New chat", folder: list[Path] = typer.Option(None, "--folder", "-f"), model: str = typer.Option("auto", "--model")):
     """Create a conversation and grant folders."""
-    cid = core.create_conversation(title, model)
-    for path in folder or []:
-        core.add_folder(cid, str(path))
+    client = api()
+    try:
+        cid = client.post("/chats", {"title": title, "model": None if model == "auto" else model})["id"]
+        for path in folder or []:
+            client.post(f"/chats/{cid}/folders", grant_body(client, path))
+    except ApiError as exc:
+        fail(exc)
     console.print(cid)
+
 
 @app.command()
 def chats():
     """List conversations."""
+    client = api()
+    try:
+        names = {p["id"]: p["name"] for p in client.get("/projects")}
+        rows = client.get("/chats")
+    except ApiError as exc:
+        fail(exc)
     table = Table("ID", "Title", "Project", "Created")
-    names = {p["id"]: p["name"] for p in core.projects()}
-    for row in core.conversations():
+    for row in rows:
         table.add_row(row["id"], row["title"], names.get(row["project_id"], ""), row["created"][:19])
     console.print(table)
 
+
 @app.command()
 def grant(chat_id: str, folder: Path):
-    """Grant an existing conversation access to a folder."""
-    console.print(core.add_folder(chat_id, str(folder)))
+    """Grant an existing conversation access to a file or folder."""
+    client = api()
+    try:
+        console.print(client.post(f"/chats/{chat_id}/folders", grant_body(client, folder))["path"])
+    except ApiError as exc:
+        fail(exc)
+
 
 @app.command()
 def model(chat_id: str, name: str = "auto"):
     """Pin a model to a conversation, or select auto routing."""
-    selected = core.set_conversation_model(chat_id, name)
+    try:
+        selected = api().put(f"/chats/{chat_id}/model", {"model": name})["model"]
+    except ApiError as exc:
+        fail(exc)
     console.print(selected or "Auto router enabled")
+
 
 @app.command()
 def models():
     """List models available through configured providers."""
-    for name in core.available_models():
-        console.print(name)
+    try:
+        for name in api().get("/config")["available_models"]:
+            console.print(name)
+    except ApiError as exc:
+        fail(exc)
+
 
 @app.command()
 def rename(chat_id: str, title: str):
     """Rename a conversation."""
-    core.rename_conversation(chat_id, title)
+    try:
+        api().patch(f"/chats/{chat_id}", {"title": title})
+    except ApiError as exc:
+        fail(exc)
     console.print(title)
+
 
 @app.command()
 def delete(chat_id: str, yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation")):
     """Permanently delete a conversation and its history."""
-    title = core.get_conversation(chat_id)["title"]
-    if not yes and not typer.confirm(f"Delete '{title}' permanently?"):
-        raise typer.Exit()
-    core.delete_conversation(chat_id)
+    client = api()
+    try:
+        title = client.get(f"/chats/{chat_id}")["conversation"]["title"]
+        if not yes and not typer.confirm(f"Delete '{title}' permanently?"):
+            raise typer.Exit()
+        client.delete(f"/chats/{chat_id}")
+    except ApiError as exc:
+        fail(exc)
     console.print(f"Deleted {title}")
+
 
 @app.command()
 def move(chat_id: str, project_id: str = typer.Argument(None, help="Target project id; omit to remove from its project")):
     """Move a conversation into a project (or out of one)."""
-    core.move_conversation(chat_id, project_id)
+    try:
+        api().put(f"/chats/{chat_id}/project", {"project_id": project_id})
+    except ApiError as exc:
+        fail(exc)
     console.print(project_id or "No project")
+
 
 @app.command()
 def projects():
     """List projects."""
+    client = api()
+    try:
+        rows, chats_ = client.get("/projects"), client.get("/chats")
+    except ApiError as exc:
+        fail(exc)
     table = Table("ID", "Name", "Chats")
-    chats = core.conversations()
-    for p in core.projects():
-        table.add_row(p["id"], p["name"], str(sum(c["project_id"] == p["id"] for c in chats)))
+    for p in rows:
+        table.add_row(p["id"], p["name"], str(sum(c["project_id"] == p["id"] for c in chats_)))
     console.print(table)
+
 
 @app.command()
 def project(name: str, context: str = typer.Option("", "--context", help="Instructions shared by the project's chats")):
     """Create a project."""
-    console.print(core.create_project(name, context))
+    try:
+        console.print(api().post("/projects", {"name": name, "context": context})["id"])
+    except ApiError as exc:
+        fail(exc)
+
 
 @app.command()
 def providers():
     """Show configured LLM backends and whether they are reachable."""
+    try:
+        rows = api().get("/providers")
+    except ApiError as exc:
+        fail(exc)
     table = Table("Provider", "Type", "Status", "Models")
-    for item in core.provider_status():
-        status = "[green]ok[/green]" if item["ok"] else f"[red]{item['error'][:60]}[/red]"
-        table.add_row(item["name"], item["type"] or "?", status, str(len(item["models"])))
+    for item in rows:
+        state = "[green]ok[/green]" if item["ok"] else f"[red]{item.get('error', '')[:60]}[/red]"
+        table.add_row(item["name"], item["type"] or "?", state, str(len(item["models"])))
     console.print(table)
+
+
+def run_turn(client, cid, send):
+    """Send a message (or approval), then handle approvals until the turn completes."""
+    with console.status("Jarvis is working…"):
+        detail = send()
+    while detail.get("pending"):
+        pending = detail["pending"]
+        console.print(f"[yellow]Approval requested: {pending['tool']}[/yellow]")
+        console.print_json(json.dumps(json.loads(pending["arguments"])["args"]))
+        accepted = console.input("Approve? [y/N] ").strip().lower() == "y"
+        with console.status("Jarvis is working…"):
+            detail = client.approve(cid, pending["id"], accepted)
+    reply = next((m for m in reversed(detail["messages"]) if m["role"] == "assistant"), None)
+    return detail, reply
+
 
 @app.command()
 def chat(chat_id: str, model: str = "auto"):
     """Chat in terminal; type /quit to exit."""
-    core.history(chat_id)
-    console.print(f"[bold]Chat {chat_id}[/bold] | pinned model: {core.get_conversation(chat_id)['model_override'] or 'auto'}")
+    client = api()
+    try:
+        conv = client.get(f"/chats/{chat_id}")["conversation"]
+    except ApiError as exc:
+        fail(exc)
+    console.print(f"[bold]{conv['title']}[/bold] | pinned model: {conv['model_override'] or 'auto'} | {client.url}")
     while True:
         try:
             query = console.input("[cyan]You> [/cyan]").strip()
@@ -165,22 +314,24 @@ def chat(chat_id: str, model: str = "auto"):
         if not query:
             continue
         try:
-            result = core.respond(chat_id, query, model)
-            while result["status"] == "approval":
-                console.print(f"[yellow]Approval requested: {result['tool']}[/yellow]")
-                console.print_json(json.dumps(result["arguments"]))
-                accepted = console.input("Approve? [y/N] ").strip().lower() == "y"
-                result = core.approve(chat_id, result["id"], accepted)
-            console.print(f"[green]{result['model']} >[/green] {result['content']}")
-        except Exception as exc:
+            _, reply = run_turn(client, chat_id, lambda: client.send(chat_id, query, model))
+            if reply:
+                console.print(f"[green]{reply['model']} >[/green] {reply['content']}")
+        except ApiError as exc:
             console.print(f"[red]Error: {exc}[/red]")
+
 
 @app.command()
 def ask(prompt: str, chat_id: str = typer.Option(None, "--chat-id"), model: str = "auto"):
-    """Ask once (will not automatically approve write/command tools)."""
-    cid = chat_id or core.create_conversation(prompt[:60])
-    result = core.respond(cid, prompt, model)
-    console.print_json(json.dumps({"chat_id": cid, **result}))
+    """Ask once and print the reply as JSON."""
+    client = api()
+    try:
+        cid = chat_id or client.post("/chats", {"title": prompt[:60]})["id"]
+        detail, reply = run_turn(client, cid, lambda: client.send(cid, prompt, model))
+    except ApiError as exc:
+        fail(exc)
+    console.print_json(json.dumps({"chat_id": cid, "model": reply and reply["model"], "content": reply and reply["content"]}))
+
 
 if __name__ == "__main__":
     app()

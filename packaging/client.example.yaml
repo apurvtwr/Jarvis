@@ -1,0 +1,12 @@
+# Jarvis client settings: ~/.config/jarvis/client.yaml (chmod 600 if it holds a token)
+# Used by the desktop app and the CLI. Omit this file to use the local server.
+# Environment overrides: JARVIS_URL, JARVIS_TOKEN, JARVIS_RUNNER_TOKEN.
+url: https://jarvis.example.com
+token_env: JARVIS_TOKEN        # or: token: <the server's JARVIS_AUTH_TOKEN>
+
+# `jarvis runner` (server config tools.executor: runner): runs agent tools on this computer.
+runner_token_env: JARVIS_RUNNER_TOKEN   # or runner_token: <server's JARVIS_RUNNER_TOKEN>; default: token
+runner:
+  allow: [~/projects]          # only these folders are ever reachable (default: home directory)
+  # deny: [~/.ssh, ~/.gnupg]   # default protects common credential stores
+  allow_commands: true         # false = refuse run_command on this machine

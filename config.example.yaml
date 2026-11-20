@@ -40,5 +40,11 @@ projects:
   shared_messages: 24          # recent turns from sibling chats shared into each project chat
   shared_chars_per_message: 800
 server:
-  host: 127.0.0.1
+  host: 127.0.0.1               # off-loopback (e.g. 0.0.0.0 in the cloud) requires an auth token + TLS proxy
   port: 8765
+  # auth_token: ...             # prefer the JARVIS_AUTH_TOKEN env var (~/.config/jarvis/env)
+tools:
+  executor: server              # where agent tools run: server | runner (see docs/ARCHITECTURE.md)
+  runner_timeout_seconds: 60    # per tool call sent to a runner; must exceed command_timeout_seconds
+# With executor: runner, runners authenticate with JARVIS_RUNNER_TOKEN (or server.runner_token)
+# or the API token. Put the secret in ~/.config/jarvis/env, not here.

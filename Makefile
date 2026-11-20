@@ -19,7 +19,7 @@ provision:
 	env -u PYTHONPATH $(BIN)/python -m pip install --upgrade pip
 	env -u PYTHONPATH $(BIN)/python -m pip install -e .
 	env -u PYTHONPATH $(BIN)/python -m pip check
-	env -u PYTHONPATH $(BIN)/python -c "import yaml, httpx, fastapi, uvicorn"
+	env -u PYTHONPATH $(BIN)/python -c "import yaml, httpx, fastapi, uvicorn, websockets"
 	mkdir -p $(HOME)/.config/jarvis
 	@test -f $(HOME)/.config/jarvis/config.yaml || cp config.example.yaml $(HOME)/.config/jarvis/config.yaml
 	$(BIN)/python scripts/setup_profile.py
@@ -45,6 +45,7 @@ install: provision apparmor
 	@for size in 64 128 256; do mkdir -p $(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps; cp packaging/jarvis-$$size.png $(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/jarvis.png; done
 	ln -sfn $(abspath $(BIN)/jarvis) $(HOME)/.local/bin/jarvis
 	@sed 's|@@EXEC@@|$(abspath $(BIN)/jarvis)|g' packaging/jarvis.service.in > $(HOME)/.config/systemd/user/jarvis.service
+	@sed -e 's|@@EXEC@@|$(abspath $(BIN)/jarvis)|g' -e 's|@@DOCS@@|$(abspath docs/ARCHITECTURE.md)|g' packaging/jarvis-runner.service.in > $(HOME)/.config/systemd/user/jarvis-runner.service
 	@sed -e 's|@@EXEC@@|$(abspath $(BIN)/jarvis)|g' -e 's|@@DESKTOP@@|$(DESKTOP_SHELL)|g' packaging/dev.jarvis.Jarvis.desktop.in > $(HOME)/.local/share/applications/dev.jarvis.Jarvis.desktop
 	rm -f $(HOME)/.local/share/applications/jarvis.desktop
 	-update-desktop-database $(HOME)/.local/share/applications 2>/dev/null
@@ -54,6 +55,7 @@ install: provision apparmor
 	systemctl --user restart jarvis.service
 	@$(BIN)/python scripts/check_service.py
 	@echo 'Installed. Run jarvis desktop or launch Jarvis from applications.'
+	@echo 'Remote server with tools.executor: runner? Enable the runner: systemctl --user enable --now jarvis-runner.service'
 serve:
 	$(BIN)/jarvis serve
 desktop:
@@ -64,7 +66,8 @@ test:
 uninstall:
 	-[ -f $(APPARMOR_PROFILE) ] && sudo apparmor_parser -R $(APPARMOR_PROFILE) && sudo rm -f $(APPARMOR_PROFILE)
 	-systemctl --user disable --now jarvis.service
-	rm -f $(HOME)/.local/bin/jarvis $(HOME)/.config/systemd/user/jarvis.service $(HOME)/.local/share/applications/jarvis.desktop $(HOME)/.local/share/applications/dev.jarvis.Jarvis.desktop $(HOME)/.local/share/icons/hicolor/scalable/apps/jarvis.svg
+	-systemctl --user disable --now jarvis-runner.service
+	rm -f $(HOME)/.local/bin/jarvis $(HOME)/.config/systemd/user/jarvis.service $(HOME)/.config/systemd/user/jarvis-runner.service $(HOME)/.local/share/applications/jarvis.desktop $(HOME)/.local/share/applications/dev.jarvis.Jarvis.desktop $(HOME)/.local/share/icons/hicolor/scalable/apps/jarvis.svg
 	@for size in 64 128 256; do rm -f $(HOME)/.local/share/icons/hicolor/$${size}x$${size}/apps/jarvis.png; done
 	systemctl --user daemon-reload
 clean:

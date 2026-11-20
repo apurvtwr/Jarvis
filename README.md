@@ -1,6 +1,10 @@
-# Jarvis
+<p align="center">
+  <img src="packaging/jarvis.svg" alt="Jarvis logo" width="128" height="128">
+</p>
 
-A local-first Ollama agent with a desktop UI, terminal CLI, model routing, per-conversation folder grants, tool approval, and shared SQLite history.
+<h1 align="center">Jarvis</h1>
+
+<p align="center">A local-first Ollama agent with a desktop UI, terminal CLI, model routing, per-conversation folder grants, tool approval, and shared SQLite history.</p>
 
 ## Ubuntu 24.04 quick start
 
@@ -148,6 +152,25 @@ Shortcuts: `Ctrl+N` new chat, `Ctrl+B` sidebar, `Ctrl+R` reload, `F11` fullscree
 `jarvis desktop` launches the same app from a terminal; `jarvis desktop --browser`
 (also in the launcher's right-click menu) opens the old browser window instead. On
 NVIDIA GPUs the app sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` to avoid a blank window.
+
+### Running the server elsewhere (cloud-ready)
+
+Jarvis is client/server; the desktop app and CLI only use the HTTP API. To use a
+server on another machine, create `~/.config/jarvis/client.yaml` on your computer
+(see `packaging/client.example.yaml`):
+
+```yaml
+url: https://jarvis.example.com
+token_env: JARVIS_TOKEN
+```
+
+On the server, set `JARVIS_AUTH_TOKEN`, put a TLS reverse proxy in front, and set
+`server.host`. `jarvis serve` refuses non-local binds without a token. `jarvis status`
+shows which server the CLI is talking to. Agent tools run on the server's machine by
+default. To keep files on your computer with a cloud server, set `tools.executor: runner`
+and `JARVIS_RUNNER_TOKEN` on the server, add `runner_token` and `runner.allow` to
+`client.yaml` (see `packaging/client.example.yaml`), and run `jarvis runner` (or
+`systemctl --user enable --now jarvis-runner.service`). Details in `docs/ARCHITECTURE.md`.
 
 ### Instructions for AI models
 
