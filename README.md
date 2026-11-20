@@ -1,6 +1,10 @@
-# Jarvis
+<p align="center">
+  <img src="packaging/jarvis.svg" alt="Jarvis logo" width="128" height="128">
+</p>
 
-A local-first Ollama agent with a desktop UI, terminal CLI, model routing, per-conversation folder grants, tool approval, and shared SQLite history.
+<h1 align="center">Jarvis</h1>
+
+<p align="center">A local-first Ollama agent with a desktop UI, terminal CLI, model routing, per-conversation folder grants, tool approval, and shared SQLite history.</p>
 
 ## Ubuntu 24.04 quick start
 
