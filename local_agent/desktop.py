@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -75,23 +76,43 @@ def dependencies_ok():
         return False
 
 
-def backend_url():
-    if os.environ.get("JARVIS_URL"):
-        return os.environ["JARVIS_URL"].rstrip("/")
-    host, port = "127.0.0.1", 8765
-    config = CONFIG_DIR / "config.yaml"
+def read_yaml(path):
     try:
-        import yaml
-        server = (yaml.safe_load(config.read_text()) or {}).get("server", {})
-        host, port = server.get("host", host), server.get("port", port)
+        import yaml  # python3-yaml ships with Ubuntu; optional
+        return yaml.safe_load(path.read_text()) or {}
     except Exception:
-        pass
-    return f"http://{host}:{port}"
+        return {}
+
+
+def client_settings():
+    """Where to connect: JARVIS_URL/JARVIS_TOKEN, else ~/.config/jarvis/client.yaml,
+    else the local server from config.yaml. Mirrors local_agent/client.py (which
+    this file cannot import: it runs under the system Python)."""
+    data = read_yaml(CONFIG_DIR / "client.yaml")
+    url = os.environ.get("JARVIS_URL") or data.get("url")
+    if not url:
+        server = read_yaml(CONFIG_DIR / "config.yaml").get("server", {})
+        url = f"http://{server.get('host', '127.0.0.1')}:{server.get('port', 8765)}"
+    token = os.environ.get("JARVIS_TOKEN") or data.get("token") or (
+        os.environ.get(data["token_env"]) if data.get("token_env") else None)
+    return url.rstrip("/"), token
+
+
+def is_local_url(url):
+    import ipaddress
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def backend_up(url):
     try:
-        with urlopen(url + "/api/version", timeout=1) as response:
+        with urlopen(url + "/api/version", timeout=3) as response:
             return response.status < 400
     except Exception:
         return False
@@ -100,6 +121,8 @@ def backend_up(url):
 def ensure_backend(url, wait=12.0):
     if backend_up(url):
         return True
+    if not is_local_url(url):
+        return False  # a remote server is not ours to start
     subprocess.run(["systemctl", "--user", "start", "jarvis.service"], check=False,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.monotonic() + wait
@@ -110,10 +133,17 @@ def ensure_backend(url, wait=12.0):
     return False
 
 
+def bridge_js(token):
+    # Token and hostname let app.js authenticate and decide whether the native picker's
+    # paths mean anything to the server (only if tools run on this same machine).
+    return BRIDGE_JS.replace("__CONFIG__", json.dumps({"token": token, "hostname": socket.gethostname()}))
+
+
 # Injected into every page before it loads. Exposes the native bridge to app.js.
 BRIDGE_JS = """
 window.jarvisDesktop = {
   native: true,
+  ...__CONFIG__,
   pick(kind = 'folder', multiple = true) {
     return window.webkit.messageHandlers.jarvis.postMessage({cmd: 'pick', kind, multiple});
   },
@@ -154,7 +184,11 @@ def main(argv=None):
         gi.require_version(namespace, version)
     from gi.repository import Adw, Gdk, Gio, GLib, Gtk, JavaScriptCore, WebKit
 
-    url = (args.url or backend_url()).rstrip("/")
+    configured_url, token = client_settings()
+    url = (args.url or configured_url).rstrip("/")
+    local = is_local_url(url)
+    if not local and url.startswith("http://"):
+        print(f"jarvis-desktop: warning: {url} is not encrypted; use https:// for a remote server", file=sys.stderr)
     GLib.set_prgname(APP_ID)
     GLib.set_application_name("Jarvis")
 
@@ -173,7 +207,7 @@ def main(argv=None):
 
             manager = WebKit.UserContentManager()
             manager.add_script(WebKit.UserScript.new(
-                BRIDGE_JS, WebKit.UserContentInjectedFrames.TOP_FRAME,
+                bridge_js(token), WebKit.UserContentInjectedFrames.TOP_FRAME,
                 WebKit.UserScriptInjectionTime.START, None, None))
             manager.register_script_message_handler_with_reply("jarvis", None)
             manager.connect("script-message-with-reply-received::jarvis", self.on_bridge_message)
@@ -235,7 +269,9 @@ def main(argv=None):
         def backend_failed(self):
             self.status_spinner.set_spinning(False)
             self.status_title.set_label("JARVIS BACKEND OFFLINE")
-            self.status_detail.set_label(f"Could not reach {url}.\nCheck the service with: {OFFLINE_HINT}")
+            hint = f"Check the service with: {OFFLINE_HINT}" if local else \
+                "Check your network connection and the server URL in ~/.config/jarvis/client.yaml."
+            self.status_detail.set_label(f"Could not reach {url}.\n{hint}")
             self.retry_button.set_visible(True)
             return False
 

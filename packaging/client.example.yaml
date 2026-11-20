@@ -1,0 +1,5 @@
+# Jarvis client settings: ~/.config/jarvis/client.yaml (chmod 600 if it holds a token)
+# Used by the desktop app and the CLI. Omit this file to use the local server.
+# Environment overrides: JARVIS_URL, JARVIS_TOKEN.
+url: https://jarvis.example.com
+token_env: JARVIS_TOKEN        # or: token: <the server's JARVIS_AUTH_TOKEN>

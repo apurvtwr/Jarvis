@@ -200,7 +200,101 @@ def test_workspace_instructions_reach_every_backend(tmp_path, monkeypatch):
 
 def test_pick_endpoint_without_display(monkeypatch):
     from fastapi.testclient import TestClient
+    from local_agent import server
     from local_agent.server import app
+    monkeypatch.setattr(server, "is_loopback", lambda host: True)  # same-machine browser
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     assert TestClient(app).post("/api/pick", json={"kind": "folder"}).status_code == 501
+
+
+def _server_client(tmp_path, monkeypatch, token=None):
+    from fastapi.testclient import TestClient
+    from local_agent import server
+    monkeypatch.setattr(core, "HOME", tmp_path / "data")
+    monkeypatch.setattr(core, "config", lambda: core.DEFAULT)
+    if token:
+        monkeypatch.setenv("JARVIS_AUTH_TOKEN", token)
+    else:
+        monkeypatch.delenv("JARVIS_AUTH_TOKEN", raising=False)
+    return TestClient(server.app)
+
+
+def test_auth_token_required_when_configured(tmp_path, monkeypatch):
+    client = _server_client(tmp_path, monkeypatch, token="s3cret")
+    assert client.get("/api/info").json()["auth_required"] is True   # public
+    assert client.get("/api/version").status_code == 200              # public health check
+    assert client.get("/").status_code == 200                         # UI shell is public
+    assert client.get("/api/chats").status_code == 401
+    assert client.get("/api/chats", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    assert client.get("/api/chats", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+
+
+def test_no_auth_by_default_for_local(tmp_path, monkeypatch):
+    client = _server_client(tmp_path, monkeypatch)
+    assert client.get("/api/chats").status_code == 200
+    info = client.get("/api/info").json()
+    assert info["auth_required"] is False and info["tools"]["executor"] == "server"
+
+
+def test_turns_run_in_background(tmp_path, monkeypatch):
+    import threading
+    import time
+    client = _server_client(tmp_path, monkeypatch)
+    release = threading.Event()
+
+    def slow_model(messages, model, tools=None):
+        release.wait(5)
+        return {"role": "assistant", "content": "pong", "tool_calls": []}
+
+    monkeypatch.setattr(core, "model_chat", slow_model)
+    cid = client.post("/api/chats", json={"title": "t"}).json()["id"]
+    r = client.post(f"/api/chats/{cid}/messages", json={"message": "ping"})
+    assert r.status_code == 202
+    assert client.get(f"/api/chats/{cid}").json()["conversation"]["run_status"] == "running"
+    assert client.post(f"/api/chats/{cid}/messages", json={"message": "again"}).status_code == 409
+    release.set()
+    for _ in range(50):
+        d = client.get(f"/api/chats/{cid}").json()
+        if d["conversation"]["run_status"] != "running":
+            break
+        time.sleep(0.05)
+    assert d["conversation"]["run_status"] == "idle"
+    assert [m["content"] for m in d["messages"]] == ["ping", "pong"]
+
+
+def test_failed_turn_records_error_and_interrupted_runs_reset(tmp_path, monkeypatch):
+    monkeypatch.setattr(core, "HOME", tmp_path / "data")
+    monkeypatch.setattr(core, "config", lambda: core.DEFAULT)
+    cid = core.create_conversation()
+    core.begin_run(cid)
+    with pytest.raises(RuntimeError):
+        core.begin_run(cid)
+    with pytest.raises(ValueError):
+        core.run_turn(cid, lambda c: (_ for _ in ()).throw(ValueError("model offline")))
+    conv = core.get_conversation(cid)
+    assert conv["run_status"] == "error" and conv["run_error"] == "model offline"
+    core.begin_run(cid)
+    core.reset_interrupted_runs()
+    assert "Interrupted" in core.get_conversation(cid)["run_error"]
+
+
+def test_remote_client_cannot_use_server_picker(tmp_path, monkeypatch):
+    from local_agent import server
+    client = _server_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(server, "is_loopback", lambda host: False)
+    assert client.post("/api/pick", json={"kind": "folder"}).status_code == 403
+
+
+def test_client_settings_precedence(tmp_path, monkeypatch):
+    from local_agent import client as jc
+    cfg = tmp_path / "client.yaml"
+    cfg.write_text("url: https://jarvis.example.com/\ntoken_env: MY_TOKEN\n")
+    monkeypatch.setattr(jc, "CLIENT_CONFIG", cfg)
+    monkeypatch.delenv("JARVIS_URL", raising=False)
+    monkeypatch.delenv("JARVIS_TOKEN", raising=False)
+    monkeypatch.setenv("MY_TOKEN", "abc")
+    assert jc.client_settings() == {"url": "https://jarvis.example.com", "token": "abc"}
+    monkeypatch.setenv("JARVIS_URL", "http://127.0.0.1:9000")
+    assert jc.client_settings()["url"] == "http://127.0.0.1:9000"
+    assert jc.is_local_url("http://127.0.0.1:9000") and not jc.is_local_url("https://jarvis.example.com")

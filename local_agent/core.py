@@ -20,7 +20,10 @@ DEFAULT = {
     "routing": {"mode": "heuristic"},
     "agent": {"max_steps": 8, "max_file_bytes": 100000, "command_timeout_seconds": 30, "instructions_max_chars": 12000},
     "projects": {"shared_messages": 24, "shared_chars_per_message": 800},
-    "server": {"host": "127.0.0.1", "port": 8765},
+    "server": {"host": "127.0.0.1", "port": 8765, "auth_token": None},
+    # Where agent tools (read/write/run) execute. "server" = on the machine running the
+    # backend. A future "runner" executor will execute them on the user's own machine.
+    "tools": {"executor": "server"},
 }
 
 def config():
@@ -49,8 +52,10 @@ def db():
     """)
     if "model_override" not in {r[1] for r in con.execute("PRAGMA table_info(conversations)")}:
         con.execute("ALTER TABLE conversations ADD COLUMN model_override TEXT")
-    if "project_id" not in {r[1] for r in con.execute("PRAGMA table_info(conversations)")}:
-        con.execute("ALTER TABLE conversations ADD COLUMN project_id TEXT")
+    columns = {r[1] for r in con.execute("PRAGMA table_info(conversations)")}
+    for column in ("project_id", "run_status", "run_error"):
+        if column not in columns:
+            con.execute(f"ALTER TABLE conversations ADD COLUMN {column} TEXT")
     return con
 
 def now():
@@ -242,6 +247,30 @@ def tool_execute(cid, name, args):
 
 APPROVAL_TOOLS = {"write_file", "run_command"}
 
+
+class ServerExecutor:
+    """Runs agent tools on the machine hosting the backend, inside granted paths.
+
+    This is correct when the backend runs on the user's own computer. For a cloud
+    backend the files live on the user's machine instead; that needs a runner
+    executor that forwards each call to a small agent on that machine (see
+    docs/ARCHITECTURE.md). Executors share this interface."""
+
+    location = "server"
+
+    def execute(self, cid, name, args):
+        return tool_execute(cid, name, args)
+
+
+EXECUTORS = {"server": ServerExecutor}
+
+
+def executor():
+    kind = config().get("tools", {}).get("executor", "server")
+    if kind not in EXECUTORS:
+        raise ValueError(f"Unknown tool executor: {kind!r}")
+    return EXECUTORS[kind]()
+
 TOOL_DEFS = [
     ("list_files", "List files within an authorized directory", {"path": "string"}),
     ("read_file", "Read a file within an authorized directory", {"path": "string"}),
@@ -352,6 +381,41 @@ def pending(cid):
         row = con.execute("SELECT * FROM approvals WHERE conversation_id=? AND status='pending' ORDER BY rowid LIMIT 1", (cid,)).fetchone()
         return dict(row) if row else None
 
+def begin_run(cid):
+    """Mark a turn as running; refuse if one is already in flight for this chat."""
+    with db() as con:
+        require_conversation(con, cid)
+        cur = con.execute("UPDATE conversations SET run_status='running', run_error=NULL "
+                          "WHERE id=? AND COALESCE(run_status,'')!='running'", (cid,))
+        if cur.rowcount == 0:
+            raise RuntimeError("Jarvis is already working on this chat")
+
+
+def end_run(cid, error=None):
+    with db() as con:
+        con.execute("UPDATE conversations SET run_status=?, run_error=? WHERE id=?",
+                    ("error" if error else "idle", error, cid))
+
+
+def reset_interrupted_runs():
+    """Runs that were in flight when the server stopped can never finish."""
+    with db() as con:
+        con.execute("UPDATE conversations SET run_status='error', run_error='Interrupted: the Jarvis server restarted. Send the message again.' "
+                    "WHERE run_status='running'")
+
+
+def run_turn(cid, fn, *args):
+    """Execute a turn (respond/approve) and record its outcome on the conversation.
+    Callers must have called begin_run first."""
+    try:
+        result = fn(cid, *args)
+    except Exception as exc:
+        end_run(cid, str(exc) or exc.__class__.__name__)
+        raise
+    end_run(cid)
+    return result
+
+
 def respond(cid, query, override=None):
     if pending(cid):
         raise ValueError("Resolve the pending tool approval first")
@@ -441,7 +505,7 @@ def run_agent(cid, messages, model):
                     con.execute("INSERT INTO approvals VALUES (?,?,?,?,?,NULL)", (aid, cid, name, json.dumps(state), "pending"))
                 return {"status": "approval", "id": aid, "tool": name, "arguments": args, "model": model}
             try:
-                result = tool_execute(cid, name, args)
+                result = executor().execute(cid, name, args)
             except Exception as exc:
                 result = f"Tool error: {exc}"
             messages.append({"role": "tool", "content": str(result), "tool_name": name, "tool_call_id": call.get("id")})
@@ -459,7 +523,7 @@ def approve(cid, aid, accept):
         con.execute("UPDATE approvals SET status=? WHERE id=?", ("approved" if accept else "denied", aid))
     if accept:
         try:
-            result = tool_execute(cid, row["tool"], payload["args"])
+            result = executor().execute(cid, row["tool"], payload["args"])
         except Exception as exc:
             result = f"Tool error: {exc}"
     else:

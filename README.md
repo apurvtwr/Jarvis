@@ -149,6 +149,22 @@ Shortcuts: `Ctrl+N` new chat, `Ctrl+B` sidebar, `Ctrl+R` reload, `F11` fullscree
 (also in the launcher's right-click menu) opens the old browser window instead. On
 NVIDIA GPUs the app sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` to avoid a blank window.
 
+### Running the server elsewhere (cloud-ready)
+
+Jarvis is client/server; the desktop app and CLI only use the HTTP API. To use a
+server on another machine, create `~/.config/jarvis/client.yaml` on your computer
+(see `packaging/client.example.yaml`):
+
+```yaml
+url: https://jarvis.example.com
+token_env: JARVIS_TOKEN
+```
+
+On the server, set `JARVIS_AUTH_TOKEN`, put a TLS reverse proxy in front, and set
+`server.host`. `jarvis serve` refuses non-local binds without a token. `jarvis status`
+shows which server the CLI is talking to. Agent tools run on the server's machine today;
+a local "runner" for cloud setups is designed in `docs/ARCHITECTURE.md`.
+
 ### Instructions for AI models
 
 `AGENTS.md` holds the rules for any AI working on this repo (Claude, GPT/Codex,

@@ -11,20 +11,26 @@ named here before changing anything; do not invent APIs, files or commands.
 
 ## What Jarvis is
 
-A personal local-first agent for Ubuntu 24.04:
+A personal agent for Ubuntu 24.04, built as **client/server**: the server runs
+locally today and is designed to move to the cloud. Read
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** before changing how clients and
+the server talk; never add a client feature that assumes the server is on the same
+machine.
 
 | Part | Path | Runs with |
 |---|---|---|
 | Backend API (FastAPI) | `local_agent/server.py` | project venv (`.venv`), systemd user service `jarvis.service`, `127.0.0.1:8765` |
 | Core: config, SQLite, projects/chats, tools, agent loop | `local_agent/core.py` | venv |
 | LLM backends | `local_agent/adapters.py` | venv |
-| CLI (`jarvis …`, Typer) | `local_agent/cli.py` | venv |
+| CLI (`jarvis …`, Typer) — HTTP client only, except `serve` | `local_agent/cli.py`, `local_agent/client.py` | venv |
 | Native desktop app (GTK4 + libadwaita + WebKitGTK 6.0) | `local_agent/desktop.py` | **system** `/usr/bin/python3` with `python3-gi`; stdlib + `gi` only, never import the package or venv deps there |
 | Web UI loaded by the desktop app | `web/index.html`, `web/theme.css`, `web/icons.js`, `web/app.js` | plain JS, no build step, no frameworks |
 | Packaging | `packaging/` (`dev.jarvis.Jarvis.desktop.in`, `jarvis.service.in`, icons), `Makefile`, `scripts/` | |
 
-Data: `~/.local/share/jarvis/agent.sqlite3`. Config: `~/.config/jarvis/config.yaml`
-(see `config.example.yaml`). Secrets: `~/.config/jarvis/env` (service `EnvironmentFile`).
+Server data: `~/.local/share/jarvis/agent.sqlite3`. Server config: `~/.config/jarvis/config.yaml`
+(see `config.example.yaml`). Server secrets: `~/.config/jarvis/env` (service `EnvironmentFile`).
+Client config (where to connect): `~/.config/jarvis/client.yaml` or `JARVIS_URL`/`JARVIS_TOKEN`
+(see `packaging/client.example.yaml`).
 
 ## Non-negotiable: the Tron theme
 
@@ -43,6 +49,11 @@ No UI frameworks, component libraries or light theme. The GTK window chrome in
   (format documented at the top of the file) and optionally `list_models()`.
   Built-ins: `ollama`, `openai` (+ any OpenAI-compatible `base_url`), `anthropic`.
   Model ids are `provider/model`, providers are keys under `providers:` in config.
+* **Client/server** — clients use only the HTTP API; `GET /api/info` reports auth and
+  where tools run. Turns are async: `POST …/messages` → 202, poll `GET /chats/{id}`
+  until `conversation.run_status` ≠ `running`. Auth: bearer token when configured.
+* **Tool executors** — `core.EXECUTORS` (`server` today; `runner` planned). Tools must
+  go through `core.executor()`, never call `tool_execute` directly from new code.
 * **Agent loop** — `core.run_agent`. `list_files`/`read_file` run freely inside
   granted paths; `write_file`/`run_command` pause for user approval and resume
   via `core.approve`, threading `tool_call_id`s.
@@ -53,9 +64,10 @@ No UI frameworks, component libraries or light theme. The GTK window chrome in
   sibling turns (`core.project_context`). Chats can be renamed, moved, deleted.
 * **Workspace instructions** — `core.workspace_instructions` loads `AGENTS.md`
   / `CLAUDE.md` from attached folder roots into every backend's system prompt.
-* **Desktop bridge** — `desktop.py` injects `window.jarvisDesktop.pick(kind,
-  multiple)` → native GTK file dialog. In browser mode `web/app.js` falls back
-  to `POST /api/pick` (zenity) and then to a typed path.
+* **Desktop bridge** — `desktop.py` injects `window.jarvisDesktop` (`pick(kind,
+  multiple)` → native GTK dialog, plus `token` and `hostname`). Browsing is offered
+  only when the server's tools run on this same host; otherwise a typed path. In a
+  browser on the server's machine `web/app.js` uses `POST /api/pick` (zenity).
 
 ## Working rules
 
@@ -65,5 +77,9 @@ No UI frameworks, component libraries or light theme. The GTK window chrome in
 * Keep `desktop.py` importable without GTK (it must print a helpful message).
 * Do not add dependencies without updating `pyproject.toml` and `Makefile`
   provisioning; system packages go in the `provision` apt line.
-* Security: the API is unauthenticated and bound to localhost; keep JSON bodies
-  on state-changing endpoints (CORS preflight protection) and never bind to 0.0.0.0.
+* Security: with no token the API is open, so it must stay on loopback; any other
+  bind requires a token (enforced by `jarvis serve`) and TLS in front. Keep JSON
+  bodies on state-changing endpoints (CORS preflight protection). Never put tokens in
+  URLs or command-line arguments.
+* Local-only behaviour (systemctl, journalctl hints, zenity) must be gated on a
+  loopback server URL.
